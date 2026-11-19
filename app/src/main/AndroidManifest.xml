@@ -7,7 +7,7 @@
 
     <application
         android:allowBackup="true"
-        android:label="Satobii Player"
+        android:label="Astra Player"
         android:theme="@android:style/Theme.Material.NoActionBar"
         android:supportsRtl="true">
         <service
