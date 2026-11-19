@@ -20,6 +20,7 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -29,8 +30,11 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ArrowBack
 import androidx.compose.material.icons.filled.Folder
+import androidx.compose.material.icons.filled.Forward5
 import androidx.compose.material.icons.filled.MoreVert
+import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material.icons.filled.PlayArrow
+import androidx.compose.material.icons.filled.Replay5
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Sort
 import androidx.compose.material3.*
@@ -40,6 +44,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
@@ -53,6 +58,7 @@ import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.ui.AspectRatioFrameLayout
 import androidx.media3.ui.PlayerView
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.util.Locale
@@ -401,7 +407,12 @@ private fun VideoPlayerScreen(
         initialPage = initialIndex.coerceIn(0, (videos.size - 1).coerceAtLeast(0))
     ) { videos.size }
     val coroutineScope = rememberCoroutineScope()
+    var controlsVisible by remember { mutableStateOf(false) }
     var settingsOpen by remember { mutableStateOf(false) }
+    var isPlaying by remember { mutableStateOf(player.isPlaying) }
+    var currentPos by remember { mutableLongStateOf(0L) }
+    var duration by remember { mutableLongStateOf(0L) }
+    var touchTick by remember { mutableIntStateOf(0) }
 
     LaunchedEffect(videos, playbackMode) {
         player.repeatMode = if (playbackMode == PlaybackMode.REPEAT) Player.REPEAT_MODE_ONE else Player.REPEAT_MODE_ALL
@@ -415,11 +426,21 @@ private fun VideoPlayerScreen(
 
     DisposableEffect(player, playbackMode) {
         val listener = object : Player.Listener {
+            override fun onIsPlayingChanged(playing: Boolean) {
+                isPlaying = playing
+            }
+
             override fun onMediaItemTransition(mediaItem: MediaItem?, reason: Int) {
+                currentPos = 0L
+                duration = player.duration.coerceAtLeast(0L)
                 if (playbackMode == PlaybackMode.AUTO_NEXT && reason == Player.MEDIA_ITEM_TRANSITION_REASON_AUTO) {
                     val next = player.currentMediaItemIndex
                     if (next >= 0) coroutineScope.launch { pagerState.animateScrollToPage(next) }
                 }
+            }
+
+            override fun onPlaybackStateChanged(playbackState: Int) {
+                duration = player.duration.coerceAtLeast(0L)
             }
         }
         player.addListener(listener)
@@ -427,6 +448,8 @@ private fun VideoPlayerScreen(
     }
 
     LaunchedEffect(pagerState.currentPage) {
+        controlsVisible = false
+        settingsOpen = false
         if (videos.isNotEmpty() && player.currentMediaItemIndex != pagerState.currentPage) {
             player.seekTo(pagerState.currentPage, 0L)
             player.playWhenReady = true
@@ -434,7 +457,37 @@ private fun VideoPlayerScreen(
         }
     }
 
-    Box(Modifier.fillMaxSize().background(Color.Black)) {
+    LaunchedEffect(controlsVisible, settingsOpen, touchTick) {
+        if (controlsVisible && !settingsOpen) {
+            delay(3500)
+            controlsVisible = false
+        }
+    }
+
+    LaunchedEffect(player, controlsVisible) {
+        while (controlsVisible) {
+            currentPos = player.currentPosition.coerceAtLeast(0L)
+            duration = player.duration.coerceAtLeast(0L)
+            isPlaying = player.isPlaying
+            delay(250)
+        }
+    }
+
+    val activeVideo = videos.getOrNull(pagerState.currentPage)
+
+    Box(
+        Modifier.fillMaxSize()
+            .background(Color.Black)
+            .pointerInput(Unit) {
+                detectTapGestures(
+                    onTap = {
+                        controlsVisible = !controlsVisible
+                        if (controlsVisible) touchTick++
+                        else settingsOpen = false
+                    }
+                )
+            }
+    ) {
         VerticalPager(state = pagerState, modifier = Modifier.fillMaxSize()) { page ->
             Box(Modifier.fillMaxSize()) {
                 if (page == pagerState.currentPage) {
@@ -443,7 +496,7 @@ private fun VideoPlayerScreen(
                         factory = { ctx ->
                             PlayerView(ctx).apply {
                                 this.player = player
-                                useController = true
+                                useController = false
                                 resizeMode = AspectRatioFrameLayout.RESIZE_MODE_FIT
                                 setShowBuffering(PlayerView.SHOW_BUFFERING_WHEN_PLAYING)
                             }
@@ -451,46 +504,128 @@ private fun VideoPlayerScreen(
                         update = { it.player = player }
                     )
                 }
-                Column(
-                    Modifier.align(Alignment.BottomStart)
-                        .fillMaxWidth()
-                        .background(Color(0x66000000))
-                        .padding(16.dp)
-                ) {
-                    Text(videos[page].name, color = TextMain, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                    Text("${page + 1} / ${videos.size}", color = TextMuted, fontSize = 12.sp)
-                }
             }
         }
 
-        Row(
-            Modifier.align(Alignment.TopStart)
-                .fillMaxWidth()
-                .statusBarsPadding()
-                .padding(top = 12.dp, start = 8.dp, end = 8.dp),
-            horizontalArrangement = Arrangement.SpaceBetween,
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            IconButton(onClick = onBack) {
-                Icon(Icons.Default.ArrowBack, contentDescription = "Back", tint = TextMain)
-            }
-            Box {
-                IconButton(onClick = { settingsOpen = true }) {
-                    Icon(Icons.Default.Settings, contentDescription = "Settings", tint = TextMain)
+        if (controlsVisible && activeVideo != null) {
+            Row(
+                Modifier.align(Alignment.TopStart)
+                    .fillMaxWidth()
+                    .background(Color(0x99000000))
+                    .statusBarsPadding()
+                    .padding(top = 12.dp, start = 8.dp, end = 8.dp, bottom = 8.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                IconButton(onClick = onBack) {
+                    Icon(Icons.Default.ArrowBack, contentDescription = "Back", tint = TextMain)
                 }
-                DropdownMenu(expanded = settingsOpen, onDismissRequest = { settingsOpen = false }) {
-                    Row(
-                        Modifier.padding(horizontal = 16.dp, vertical = 10.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(16.dp)
-                    ) {
-                        Text("Auto next", color = TextMain)
-                        Switch(
-                            checked = playbackMode == PlaybackMode.AUTO_NEXT,
-                            onCheckedChange = {
-                                onModeChange()
-                                settingsOpen = false
-                            }
+                Text(
+                    text = activeVideo.name,
+                    color = TextMain,
+                    fontSize = 15.sp,
+                    fontWeight = FontWeight.Medium,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.weight(1f).padding(horizontal = 6.dp)
+                )
+                Box {
+                    IconButton(onClick = {
+                        settingsOpen = true
+                        touchTick++
+                    }) {
+                        Icon(Icons.Default.Settings, contentDescription = "Settings", tint = TextMain)
+                    }
+                    DropdownMenu(expanded = settingsOpen, onDismissRequest = { settingsOpen = false }) {
+                        Row(
+                            Modifier.padding(horizontal = 16.dp, vertical = 10.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(16.dp)
+                        ) {
+                            Text("Auto next", color = TextMain)
+                            Switch(
+                                checked = playbackMode == PlaybackMode.AUTO_NEXT,
+                                onCheckedChange = {
+                                    onModeChange()
+                                    settingsOpen = false
+                                }
+                            )
+                        }
+                    }
+                }
+            }
+
+            Column(
+                Modifier.align(Alignment.BottomStart)
+                    .fillMaxWidth()
+                    .background(Color(0xAA000000))
+                    .navigationBarsPadding()
+                    .padding(horizontal = 16.dp, vertical = 12.dp)
+            ) {
+                val safeDuration = duration.coerceAtLeast(1L)
+                val progress = (currentPos.toFloat() / safeDuration.toFloat()).coerceIn(0f, 1f)
+                Slider(
+                    value = progress,
+                    onValueChange = { fraction ->
+                        touchTick++
+                        val target = (fraction * safeDuration).toLong()
+                        currentPos = target
+                        player.seekTo(target)
+                    },
+                    colors = SliderDefaults.colors(
+                        thumbColor = TextMain,
+                        activeTrackColor = TextMain,
+                        inactiveTrackColor = Color(0x55FFFFFF)
+                    )
+                )
+                Row(
+                    Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    Text(formatDuration(currentPos), color = TextMuted, fontSize = 12.sp)
+                    Text(formatDuration(duration), color = TextMuted, fontSize = 12.sp)
+                }
+                Spacer(Modifier.height(6.dp))
+                Row(
+                    Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceEvenly,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    IconButton(onClick = {
+                        touchTick++
+                        val target = (player.currentPosition - 5000L).coerceAtLeast(0L)
+                        player.seekTo(target)
+                        currentPos = target
+                    }) {
+                        Icon(
+                            Icons.Default.Replay5,
+                            contentDescription = "Back 5s",
+                            tint = TextMain,
+                            modifier = Modifier.size(32.dp)
+                        )
+                    }
+                    IconButton(onClick = {
+                        touchTick++
+                        if (player.isPlaying) player.pause() else player.play()
+                    }) {
+                        Icon(
+                            imageVector = if (isPlaying) Icons.Default.Pause else Icons.Default.PlayArrow,
+                            contentDescription = if (isPlaying) "Pause" else "Play",
+                            tint = TextMain,
+                            modifier = Modifier.size(40.dp)
+                        )
+                    }
+                    IconButton(onClick = {
+                        touchTick++
+                        val maxPos = if (duration > 0L) duration else player.currentPosition + 5000L
+                        val target = (player.currentPosition + 5000L).coerceAtMost(maxPos)
+                        player.seekTo(target)
+                        currentPos = target
+                    }) {
+                        Icon(
+                            Icons.Default.Forward5,
+                            contentDescription = "Forward 5s",
+                            tint = TextMain,
+                            modifier = Modifier.size(32.dp)
                         )
                     }
                 }
