@@ -95,7 +95,7 @@ private fun SatobiiApp() {
     }
     var albums by remember { mutableStateOf<List<AlbumEntry>>(emptyList()) }
     var allVideos by remember { mutableStateOf<List<VideoEntry>>(emptyList()) }
-    var selectedAlbum by remember { mutableStateOf<Long?>(null) } }
+    var selectedAlbum by remember { mutableStateOf<Long?>(null) }
     var screen by remember { mutableStateOf("albums") }
     var sortMode by remember { mutableStateOf(SortMode.DATE) }
     var ascending by remember { mutableStateOf(false) }
@@ -209,7 +209,7 @@ private fun AlbumScreen(albums: List<AlbumEntry>, total: Int, onRefresh: () -> U
             Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) { Text("No videos found.", color = TextMuted) }
         } else {
             LazyColumn(verticalArrangement = Arrangement.spacedBy(9.dp)) {
-                items(albums, key = { it.name }) { album ->
+                items(albums, key = { it.id }) { album ->
                     Row(
                         Modifier.fillMaxWidth().background(SurfaceDark, RoundedCornerShape(14.dp))
                             .clickable { onSelect(album) }.padding(16.dp),
