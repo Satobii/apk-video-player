@@ -48,6 +48,7 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ArrowBack
+import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Folder
 import androidx.compose.material.icons.filled.Forward5
@@ -90,7 +91,7 @@ private val TextMain = Color(0xFFF4F4F4)
 private val TextMuted = Color(0xFF9B9B9B)
 
 private object ThumbnailCache {
-    private val maxCacheKb = ((Runtime.getRuntime().maxMemory() / 1024L) / 6L).toInt().coerceAtLeast(6144)
+    private val maxCacheKb = ((Runtime.getRuntime().maxMemory() / 1024L) / 5L).toInt().coerceAtLeast(8192)
     val cache: LruCache<String, Bitmap> = object : LruCache<String, Bitmap>(maxCacheKb) {
         override fun sizeOf(key: String, value: Bitmap): Int = value.byteCount / 1024
     }
@@ -110,6 +111,11 @@ data class AlbumEntry(val id: Long, val name: String, val count: Int, val cover:
 
 enum class SortMode { NAME, DATE, SIZE }
 enum class PlaybackMode { REPEAT, AUTO_NEXT }
+enum class PerformanceMode(val label: String, val thumbWidth: Int, val thumbHeight: Int, val animationsEnabled: Boolean) {
+    LOW("Low (Fast, No Animation)", 128, 72, false),
+    MEDIUM("Medium (Balanced)", 160, 96, true),
+    HIGH("High (Sharp + Animation)", 320, 192, true)
+}
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -139,6 +145,7 @@ private fun AstraApp() {
     var sortMode by remember { mutableStateOf(SortMode.DATE) }
     var ascending by remember { mutableStateOf(false) }
     var playbackMode by remember { mutableStateOf(PlaybackMode.REPEAT) }
+    var perfMode by remember { mutableStateOf(PerformanceMode.MEDIUM) }
     var activeVideos by remember { mutableStateOf<List<VideoEntry>>(emptyList()) }
     var startAt by remember { mutableIntStateOf(0) }
     var miniPlayerActive by remember { mutableStateOf(false) }
@@ -214,23 +221,15 @@ private fun AstraApp() {
                     }
                 }
             } else {
-                AnimatedContent(
-                    targetState = screen,
-                    transitionSpec = {
-                        val goingForward = (initialState == "albums" && targetState == "videos") ||
-                            (initialState == "videos" && targetState == "player")
-                        if (goingForward) {
-                            (fadeIn(tween(180)) + slideInHorizontally(tween(220)) { it / 7 }) togetherWith
-                                (fadeOut(tween(140)) + slideOutHorizontally(tween(180)) { -it / 9 })
-                        } else {
-                            (fadeIn(tween(180)) + slideInHorizontally(tween(220)) { -it / 7 }) togetherWith
-                                (fadeOut(tween(140)) + slideOutHorizontally(tween(180)) { it / 9 })
-                        }
-                    },
-                    label = "screen_transition"
-                ) { currentScreen ->
+                val renderScreenContent: @Composable (String) -> Unit = { currentScreen ->
                     when (currentScreen) {
-                        "albums" -> AlbumScreen(albums, allVideos.size, onRefresh = { refreshToken++ }) { album ->
+                        "albums" -> AlbumScreen(
+                            albums = albums,
+                            total = allVideos.size,
+                            perfMode = perfMode,
+                            onSelectPerfMode = { perfMode = it },
+                            onRefresh = { refreshToken++ }
+                        ) { album ->
                             selectedAlbum = album.id
                             activeVideos = sortVideos(allVideos.filter { it.albumId == album.id }, sortMode, ascending)
                             startAt = 0
@@ -242,6 +241,7 @@ private fun AstraApp() {
                             videos = sortedAlbumVideos,
                             sortMode = sortMode,
                             ascending = ascending,
+                            perfMode = perfMode,
                             onBack = { screen = "albums" },
                             onSort = { mode ->
                                 if (sortMode == mode) ascending = !ascending
@@ -263,6 +263,7 @@ private fun AstraApp() {
                             initialIndex = startAt,
                             player = player,
                             playbackMode = playbackMode,
+                            perfMode = perfMode,
                             onModeChange = {
                                 playbackMode = if (playbackMode == PlaybackMode.REPEAT) PlaybackMode.AUTO_NEXT else PlaybackMode.REPEAT
                             },
@@ -270,20 +271,56 @@ private fun AstraApp() {
                         )
                     }
                 }
+
+                if (perfMode.animationsEnabled) {
+                    AnimatedContent(
+                        targetState = screen,
+                        transitionSpec = {
+                            val goingForward = (initialState == "albums" && targetState == "videos") ||
+                                (initialState == "videos" && targetState == "player")
+                            if (goingForward) {
+                                (fadeIn(tween(180)) + slideInHorizontally(tween(220)) { it / 7 }) togetherWith
+                                    (fadeOut(tween(140)) + slideOutHorizontally(tween(180)) { -it / 9 })
+                            } else {
+                                (fadeIn(tween(180)) + slideInHorizontally(tween(220)) { -it / 7 }) togetherWith
+                                    (fadeOut(tween(140)) + slideOutHorizontally(tween(180)) { it / 9 })
+                            }
+                        },
+                        label = "screen_transition"
+                    ) { currentScreen ->
+                        renderScreenContent(currentScreen)
+                    }
+                } else {
+                    renderScreenContent(screen)
+                }
             }
 
-            AnimatedVisibility(
-                visible = hasPermission && screen != "player" && miniPlayerActive,
-                enter = fadeIn(tween(180)) + scaleIn(
-                    initialScale = 0.88f,
-                    animationSpec = spring(dampingRatio = Spring.DampingRatioMediumBouncy, stiffness = Spring.StiffnessMediumLow)
-                ) + slideInVertically(tween(200)) { it / 3 },
-                exit = fadeOut(tween(140)) + scaleOut(targetScale = 0.9f, animationSpec = tween(140)) + slideOutVertically(tween(160)) { it / 3 },
-                modifier = Modifier
-                    .align(Alignment.BottomEnd)
-                    .navigationBarsPadding()
-                    .padding(end = 14.dp, bottom = 76.dp)
-            ) {
+            val showMini = hasPermission && screen != "player" && miniPlayerActive
+            if (perfMode.animationsEnabled) {
+                AnimatedVisibility(
+                    visible = showMini,
+                    enter = fadeIn(tween(180)) + scaleIn(
+                        initialScale = 0.88f,
+                        animationSpec = spring(dampingRatio = Spring.DampingRatioMediumBouncy, stiffness = Spring.StiffnessMediumLow)
+                    ) + slideInVertically(tween(200)) { it / 3 },
+                    exit = fadeOut(tween(140)) + scaleOut(targetScale = 0.9f, animationSpec = tween(140)) + slideOutVertically(tween(160)) { it / 3 },
+                    modifier = Modifier
+                        .align(Alignment.BottomEnd)
+                        .navigationBarsPadding()
+                        .padding(end = 14.dp, bottom = 76.dp)
+                ) {
+                    MiniPlayerOverlay(
+                        player = player,
+                        onExpand = {
+                            val currentIdx = player.currentMediaItemIndex.coerceIn(0, (activeVideos.size - 1).coerceAtLeast(0))
+                            startAt = currentIdx
+                            miniPlayerActive = false
+                            screen = "player"
+                        },
+                        onClose = closeMiniPlayer
+                    )
+                }
+            } else if (showMini) {
                 MiniPlayerOverlay(
                     player = player,
                     onExpand = {
@@ -292,7 +329,11 @@ private fun AstraApp() {
                         miniPlayerActive = false
                         screen = "player"
                     },
-                    onClose = closeMiniPlayer
+                    onClose = closeMiniPlayer,
+                    modifier = Modifier
+                        .align(Alignment.BottomEnd)
+                        .navigationBarsPadding()
+                        .padding(end = 14.dp, bottom = 76.dp)
                 )
             }
         }
@@ -367,9 +408,13 @@ private fun PermissionScreen(onGrant: () -> Unit) {
 private fun AlbumScreen(
     albums: List<AlbumEntry>,
     total: Int,
+    perfMode: PerformanceMode,
+    onSelectPerfMode: (PerformanceMode) -> Unit,
     onRefresh: () -> Unit,
     onSelect: (AlbumEntry) -> Unit
 ) {
+    var settingsMenuOpen by remember { mutableStateOf(false) }
+
     Column(Modifier.fillMaxSize().statusBarsPadding().padding(horizontal = 18.dp)) {
         Spacer(Modifier.height(18.dp))
         Row(
@@ -377,11 +422,45 @@ private fun AlbumScreen(
             horizontalArrangement = Arrangement.SpaceBetween,
             verticalAlignment = Alignment.CenterVertically
         ) {
-            Column {
+            Column(Modifier.weight(1f)) {
                 Text("ASTRA PLAYER", color = TextMain, fontWeight = FontWeight.Bold, fontSize = 21.sp, letterSpacing = 1.sp)
                 Text("$total videos · ${albums.size} albums", color = TextMuted, fontSize = 12.sp)
             }
-            TextButton(onClick = onRefresh) { Text("Refresh", color = TextMain) }
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                TextButton(onClick = onRefresh) { Text("Refresh", color = TextMain) }
+                Box {
+                    IconButton(onClick = { settingsMenuOpen = true }) {
+                        Icon(Icons.Default.Settings, contentDescription = "Settings", tint = TextMain)
+                    }
+                    DropdownMenu(
+                        expanded = settingsMenuOpen,
+                        onDismissRequest = { settingsMenuOpen = false },
+                        containerColor = SurfaceDark
+                    ) {
+                        Text(
+                            "Performance",
+                            color = TextMuted,
+                            fontSize = 12.sp,
+                            fontWeight = FontWeight.Bold,
+                            modifier = Modifier.padding(horizontal = 16.dp, vertical = 6.dp)
+                        )
+                        PerformanceMode.entries.forEach { mode ->
+                            DropdownMenuItem(
+                                text = { Text(mode.label, color = TextMain, fontSize = 14.sp) },
+                                trailingIcon = {
+                                    if (perfMode == mode) {
+                                        Icon(Icons.Default.Check, contentDescription = null, tint = TextMain)
+                                    }
+                                },
+                                onClick = {
+                                    onSelectPerfMode(mode)
+                                    settingsMenuOpen = false
+                                }
+                            )
+                        }
+                    }
+                }
+            }
         }
         Spacer(Modifier.height(16.dp))
         if (albums.isEmpty()) {
@@ -416,9 +495,9 @@ private fun AlbumScreen(
 }
 
 @Composable
-private fun VideoThumbnail(uri: Uri) {
+private fun VideoThumbnail(uri: Uri, perfMode: PerformanceMode) {
     val context = LocalContext.current
-    val cacheKey = remember(uri) { uri.toString() }
+    val cacheKey = remember(uri, perfMode) { "${uri}_${perfMode.name}" }
     var bitmap by remember(cacheKey) { mutableStateOf(ThumbnailCache.cache.get(cacheKey)) }
 
     LaunchedEffect(cacheKey) {
@@ -426,7 +505,7 @@ private fun VideoThumbnail(uri: Uri) {
             val loaded = withContext(Dispatchers.IO) {
                 try {
                     if (Build.VERSION.SDK_INT >= 29) {
-                        context.contentResolver.loadThumbnail(uri, Size(160, 96), null)
+                        context.contentResolver.loadThumbnail(uri, Size(perfMode.thumbWidth, perfMode.thumbHeight), null)
                     } else {
                         null
                     }
@@ -473,6 +552,7 @@ private fun VideoListScreen(
     videos: List<VideoEntry>,
     sortMode: SortMode,
     ascending: Boolean,
+    perfMode: PerformanceMode,
     onBack: () -> Unit,
     onSort: (SortMode) -> Unit,
     onPlay: (Int) -> Unit
@@ -521,7 +601,7 @@ private fun VideoListScreen(
                         .padding(horizontal = 10.dp, vertical = 8.dp),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    VideoThumbnail(uri = video.uri)
+                    VideoThumbnail(uri = video.uri, perfMode = perfMode)
                     Spacer(Modifier.width(12.dp))
                     Column(Modifier.weight(1f)) {
                         Text(
@@ -557,6 +637,7 @@ private fun VideoPlayerScreen(
     initialIndex: Int,
     player: ExoPlayer,
     playbackMode: PlaybackMode,
+    perfMode: PerformanceMode,
     onModeChange: () -> Unit,
     onBack: () -> Unit
 ) {
@@ -671,12 +752,8 @@ private fun VideoPlayerScreen(
             }
         }
 
-        AnimatedVisibility(
-            visible = controlsVisible && activeVideo != null,
-            enter = fadeIn(tween(180)) + slideInVertically(tween(200)) { -it / 2 },
-            exit = fadeOut(tween(150)) + slideOutVertically(tween(180)) { -it / 2 },
-            modifier = Modifier.align(Alignment.TopStart)
-        ) {
+        val showTopBar = controlsVisible && activeVideo != null
+        val topBarContent: @Composable () -> Unit = {
             if (activeVideo != null) {
                 Row(
                     Modifier.fillMaxWidth()
@@ -725,12 +802,23 @@ private fun VideoPlayerScreen(
             }
         }
 
-        AnimatedVisibility(
-            visible = controlsVisible && activeVideo != null,
-            enter = fadeIn(tween(180)) + slideInVertically(tween(200)) { it / 2 },
-            exit = fadeOut(tween(150)) + slideOutVertically(tween(180)) { it / 2 },
-            modifier = Modifier.align(Alignment.BottomStart)
-        ) {
+        if (perfMode.animationsEnabled) {
+            AnimatedVisibility(
+                visible = showTopBar,
+                enter = fadeIn(tween(180)) + slideInVertically(tween(200)) { -it / 2 },
+                exit = fadeOut(tween(150)) + slideOutVertically(tween(180)) { -it / 2 },
+                modifier = Modifier.align(Alignment.TopStart)
+            ) {
+                topBarContent()
+            }
+        } else if (showTopBar) {
+            Box(Modifier.align(Alignment.TopStart)) {
+                topBarContent()
+            }
+        }
+
+        val showBottomBar = controlsVisible && activeVideo != null
+        val bottomBarContent: @Composable () -> Unit = {
             Column(
                 Modifier.fillMaxWidth()
                     .background(Color(0xAA000000))
@@ -805,6 +893,21 @@ private fun VideoPlayerScreen(
                         )
                     }
                 }
+            }
+        }
+
+        if (perfMode.animationsEnabled) {
+            AnimatedVisibility(
+                visible = showBottomBar,
+                enter = fadeIn(tween(180)) + slideInVertically(tween(200)) { it / 2 },
+                exit = fadeOut(tween(150)) + slideOutVertically(tween(180)) { it / 2 },
+                modifier = Modifier.align(Alignment.BottomStart)
+            ) {
+                bottomBarContent()
+            }
+        } else if (showBottomBar) {
+            Box(Modifier.align(Alignment.BottomStart)) {
+                bottomBarContent()
             }
         }
     }
