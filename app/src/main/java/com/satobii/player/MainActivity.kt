@@ -14,11 +14,13 @@ import android.provider.Settings
 import android.util.Size
 import android.widget.Toast
 import androidx.activity.ComponentActivity
+import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.*
@@ -26,9 +28,11 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.pager.VerticalPager
 import androidx.compose.foundation.pager.rememberPagerState
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ArrowBack
+import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Folder
 import androidx.compose.material.icons.filled.Forward5
 import androidx.compose.material.icons.filled.MoreVert
@@ -114,6 +118,7 @@ private fun AstraApp() {
     var playbackMode by remember { mutableStateOf(PlaybackMode.REPEAT) }
     var activeVideos by remember { mutableStateOf<List<VideoEntry>>(emptyList()) }
     var startAt by remember { mutableIntStateOf(0) }
+    var miniPlayerActive by remember { mutableStateOf(false) }
     var refreshToken by remember { mutableIntStateOf(0) }
 
     val player = remember {
@@ -141,6 +146,24 @@ private fun AstraApp() {
         }
     }
 
+    val leavePlayerToPlaylist = {
+        miniPlayerActive = activeVideos.isNotEmpty()
+        screen = "videos"
+    }
+
+    val closeMiniPlayer = {
+        miniPlayerActive = false
+        player.pause()
+    }
+
+    BackHandler(enabled = hasPermission && screen == "player") {
+        leavePlayerToPlaylist()
+    }
+
+    BackHandler(enabled = hasPermission && screen == "videos") {
+        screen = "albums"
+    }
+
     MaterialTheme(
         colorScheme = darkColorScheme(
             background = Bg,
@@ -150,7 +173,7 @@ private fun AstraApp() {
             onSurface = TextMain
         )
     ) {
-        Surface(Modifier.fillMaxSize(), color = Bg) {
+        Box(Modifier.fillMaxSize().background(Bg)) {
             if (!hasPermission) {
                 PermissionScreen {
                     if (Build.VERSION.SDK_INT >= 33) {
@@ -184,6 +207,7 @@ private fun AstraApp() {
                     onPlay = { index ->
                         activeVideos = sortVideos(allVideos.filter { it.albumId == selectedAlbum }, sortMode, ascending)
                         startAt = index
+                        miniPlayerActive = false
                         screen = "player"
                     }
                 )
@@ -196,9 +220,75 @@ private fun AstraApp() {
                     onModeChange = {
                         playbackMode = if (playbackMode == PlaybackMode.REPEAT) PlaybackMode.AUTO_NEXT else PlaybackMode.REPEAT
                     },
-                    onBack = { screen = "videos" }
+                    onBack = leavePlayerToPlaylist
                 )
             }
+
+            if (hasPermission && screen != "player" && miniPlayerActive) {
+                MiniPlayerOverlay(
+                    player = player,
+                    onExpand = {
+                        val currentIdx = player.currentMediaItemIndex.coerceIn(0, (activeVideos.size - 1).coerceAtLeast(0))
+                        startAt = currentIdx
+                        miniPlayerActive = false
+                        screen = "player"
+                    },
+                    onClose = closeMiniPlayer,
+                    modifier = Modifier
+                        .align(Alignment.BottomEnd)
+                        .navigationBarsPadding()
+                        .padding(end = 14.dp, bottom = 76.dp)
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun MiniPlayerOverlay(
+    player: ExoPlayer,
+    onExpand: () -> Unit,
+    onClose: () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    Box(
+        modifier = modifier
+            .width(168.dp)
+            .height(98.dp)
+            .clip(RoundedCornerShape(12.dp))
+            .background(Color.Black)
+            .border(1.dp, Color(0x44FFFFFF), RoundedCornerShape(12.dp))
+            .clickable { onExpand() }
+    ) {
+        AndroidView(
+            modifier = Modifier.fillMaxSize(),
+            factory = { ctx ->
+                PlayerView(ctx).apply {
+                    this.player = player
+                    useController = false
+                    resizeMode = AspectRatioFrameLayout.RESIZE_MODE_FIT
+                    setShowBuffering(PlayerView.SHOW_BUFFERING_NEVER)
+                }
+            },
+            update = { it.player = player }
+        )
+
+        Box(
+            modifier = Modifier
+                .align(Alignment.TopEnd)
+                .padding(5.dp)
+                .size(24.dp)
+                .clip(CircleShape)
+                .background(Color(0xAA000000))
+                .clickable { onClose() },
+            contentAlignment = Alignment.Center
+        ) {
+            Icon(
+                imageVector = Icons.Default.Close,
+                contentDescription = "Close mini player",
+                tint = TextMain,
+                modifier = Modifier.size(15.dp)
+            )
         }
     }
 }
@@ -416,10 +506,17 @@ private fun VideoPlayerScreen(
 
     LaunchedEffect(videos, playbackMode) {
         player.repeatMode = if (playbackMode == PlaybackMode.REPEAT) Player.REPEAT_MODE_ONE else Player.REPEAT_MODE_ALL
-        player.clearMediaItems()
-        videos.forEach { player.addMediaItem(MediaItem.fromUri(it.uri)) }
-        player.prepare()
-        player.seekTo(pagerState.currentPage, 0L)
+        val targetIndex = pagerState.currentPage
+        val alreadyLoadedSameQueue = player.mediaItemCount == videos.size &&
+            videos.indices.all { idx -> player.getMediaItemAt(idx).localConfiguration?.uri == videos[idx].uri }
+        if (!alreadyLoadedSameQueue) {
+            player.clearMediaItems()
+            videos.forEach { player.addMediaItem(MediaItem.fromUri(it.uri)) }
+            player.prepare()
+            player.seekTo(targetIndex, player.currentPosition.coerceAtLeast(0L))
+        } else if (player.currentMediaItemIndex != targetIndex) {
+            player.seekTo(targetIndex, 0L)
+        }
         player.playWhenReady = true
         player.play()
     }
