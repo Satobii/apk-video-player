@@ -2,21 +2,22 @@ package com.satobii.player
 
 import android.Manifest
 import android.content.ContentUris
-import android.content.Intent
 import android.content.Context
-import android.widget.Toast
+import android.content.Intent
 import android.content.pm.PackageManager
-import android.database.Cursor
+import android.graphics.Bitmap
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.provider.MediaStore
 import android.provider.Settings
-import android.view.WindowManager
+import android.util.Size
+import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
@@ -30,12 +31,16 @@ import androidx.compose.material.icons.filled.ArrowBack
 import androidx.compose.material.icons.filled.Folder
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.PlayArrow
+import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Sort
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
@@ -54,6 +59,7 @@ import java.util.Locale
 
 private val Bg = Color(0xFF101010)
 private val SurfaceDark = Color(0xFF1D1D1D)
+private val ThumbPlaceholder = Color(0xFF3A3A3A)
 private val TextMain = Color(0xFFF4F4F4)
 private val TextMuted = Color(0xFF9B9B9B)
 
@@ -78,12 +84,12 @@ class MainActivity : ComponentActivity() {
         window.statusBarColor = android.graphics.Color.rgb(16, 16, 16)
         window.navigationBarColor = android.graphics.Color.rgb(16, 16, 16)
         AppHolder.resolver = contentResolver
-        setContent { SatobiiApp() }
+        setContent { AstraApp() }
     }
 }
 
 @Composable
-private fun SatobiiApp() {
+private fun AstraApp() {
     val context = LocalContext.current
     var hasPermission by remember {
         mutableStateOf(
@@ -129,10 +135,15 @@ private fun SatobiiApp() {
         }
     }
 
-    MaterialTheme(colorScheme = darkColorScheme(
-        background = Bg, surface = SurfaceDark, primary = Color.White,
-        onBackground = TextMain, onSurface = TextMain
-    )) {
+    MaterialTheme(
+        colorScheme = darkColorScheme(
+            background = Bg,
+            surface = SurfaceDark,
+            primary = Color.White,
+            onBackground = TextMain,
+            onSurface = TextMain
+        )
+    ) {
         Surface(Modifier.fillMaxSize(), color = Bg) {
             if (!hasPermission) {
                 PermissionScreen {
@@ -150,6 +161,7 @@ private fun SatobiiApp() {
                     startAt = 0
                     screen = "videos"
                 }
+
                 "videos" -> VideoListScreen(
                     album = albums.firstOrNull { it.id == selectedAlbum }?.name ?: "Videos",
                     videos = sortVideos(allVideos.filter { it.albumId == selectedAlbum }, sortMode, ascending),
@@ -158,7 +170,10 @@ private fun SatobiiApp() {
                     onBack = { screen = "albums" },
                     onSort = { mode ->
                         if (sortMode == mode) ascending = !ascending
-                        else { sortMode = mode; ascending = mode == SortMode.NAME }
+                        else {
+                            sortMode = mode
+                            ascending = mode == SortMode.NAME
+                        }
                     },
                     onPlay = { index ->
                         activeVideos = sortVideos(allVideos.filter { it.albumId == selectedAlbum }, sortMode, ascending)
@@ -166,6 +181,7 @@ private fun SatobiiApp() {
                         screen = "player"
                     }
                 )
+
                 "player" -> VideoPlayerScreen(
                     videos = activeVideos,
                     initialIndex = startAt,
@@ -174,8 +190,7 @@ private fun SatobiiApp() {
                     onModeChange = {
                         playbackMode = if (playbackMode == PlaybackMode.REPEAT) PlaybackMode.AUTO_NEXT else PlaybackMode.REPEAT
                     },
-                    onBack = { screen = "videos" },
-                    onFloating = { index -> launchFloatingWindow(context, activeVideos, index) }
+                    onBack = { screen = "videos" }
                 )
             }
         }
@@ -184,8 +199,12 @@ private fun SatobiiApp() {
 
 @Composable
 private fun PermissionScreen(onGrant: () -> Unit) {
-    Column(Modifier.fillMaxSize().padding(28.dp), verticalArrangement = Arrangement.Center, horizontalAlignment = Alignment.CenterHorizontally) {
-        Text("SATOBII PLAYER", color = TextMain, fontSize = 24.sp, fontWeight = FontWeight.Bold)
+    Column(
+        Modifier.fillMaxSize().padding(28.dp),
+        verticalArrangement = Arrangement.Center,
+        horizontalAlignment = Alignment.CenterHorizontally
+    ) {
+        Text("ASTRA PLAYER", color = TextMain, fontSize = 24.sp, fontWeight = FontWeight.Bold)
         Spacer(Modifier.height(12.dp))
         Text("Allow video access to show your phone albums.", color = TextMuted)
         Spacer(Modifier.height(20.dp))
@@ -194,25 +213,38 @@ private fun PermissionScreen(onGrant: () -> Unit) {
 }
 
 @Composable
-private fun AlbumScreen(albums: List<AlbumEntry>, total: Int, onRefresh: () -> Unit, onSelect: (AlbumEntry) -> Unit) {
-    Column(Modifier.fillMaxSize().padding(horizontal = 18.dp)) {
-        Spacer(Modifier.height(22.dp))
-        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
+private fun AlbumScreen(
+    albums: List<AlbumEntry>,
+    total: Int,
+    onRefresh: () -> Unit,
+    onSelect: (AlbumEntry) -> Unit
+) {
+    Column(Modifier.fillMaxSize().statusBarsPadding().padding(horizontal = 18.dp)) {
+        Spacer(Modifier.height(18.dp))
+        Row(
+            Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
             Column {
-                Text("SATOBII PLAYER", color = TextMain, fontWeight = FontWeight.Bold, fontSize = 21.sp, letterSpacing = 1.sp)
+                Text("ASTRA PLAYER", color = TextMain, fontWeight = FontWeight.Bold, fontSize = 21.sp, letterSpacing = 1.sp)
                 Text("$total videos · ${albums.size} albums", color = TextMuted, fontSize = 12.sp)
             }
             TextButton(onClick = onRefresh) { Text("Refresh", color = TextMain) }
         }
         Spacer(Modifier.height(16.dp))
         if (albums.isEmpty()) {
-            Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) { Text("No videos found.", color = TextMuted) }
+            Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                Text("No videos found.", color = TextMuted)
+            }
         } else {
             LazyColumn(verticalArrangement = Arrangement.spacedBy(9.dp)) {
                 items(albums, key = { it.id }) { album ->
                     Row(
-                        Modifier.fillMaxWidth().background(SurfaceDark, RoundedCornerShape(14.dp))
-                            .clickable { onSelect(album) }.padding(16.dp),
+                        Modifier.fillMaxWidth()
+                            .background(SurfaceDark, RoundedCornerShape(14.dp))
+                            .clickable { onSelect(album) }
+                            .padding(16.dp),
                         verticalAlignment = Alignment.CenterVertically
                     ) {
                         Icon(Icons.Default.Folder, contentDescription = null, tint = TextMuted, modifier = Modifier.size(30.dp))
@@ -230,41 +262,125 @@ private fun AlbumScreen(albums: List<AlbumEntry>, total: Int, onRefresh: () -> U
 }
 
 @Composable
+private fun VideoThumbnail(uri: Uri) {
+    val context = LocalContext.current
+    var bitmap by remember(uri) { mutableStateOf<Bitmap?>(null) }
+
+    LaunchedEffect(uri) {
+        bitmap = withContext(Dispatchers.IO) {
+            try {
+                if (Build.VERSION.SDK_INT >= 29) {
+                    context.contentResolver.loadThumbnail(uri, Size(240, 160), null)
+                } else {
+                    null
+                }
+            } catch (_: Exception) {
+                null
+            }
+        }
+    }
+
+    Box(
+        Modifier.width(116.dp)
+            .height(68.dp)
+            .clip(RoundedCornerShape(8.dp))
+            .background(ThumbPlaceholder),
+        contentAlignment = Alignment.Center
+    ) {
+        val currentBitmap = bitmap
+        if (currentBitmap != null) {
+            Image(
+                bitmap = currentBitmap.asImageBitmap(),
+                contentDescription = null,
+                contentScale = ContentScale.Crop,
+                modifier = Modifier.fillMaxSize()
+            )
+        } else {
+            Icon(
+                imageVector = Icons.Default.PlayArrow,
+                contentDescription = null,
+                tint = Color(0xFF9E9E9E),
+                modifier = Modifier.size(28.dp)
+            )
+        }
+    }
+}
+
+@Composable
 private fun VideoListScreen(
-    album: String, videos: List<VideoEntry>, sortMode: SortMode, ascending: Boolean,
-    onBack: () -> Unit, onSort: (SortMode) -> Unit, onPlay: (Int) -> Unit
+    album: String,
+    videos: List<VideoEntry>,
+    sortMode: SortMode,
+    ascending: Boolean,
+    onBack: () -> Unit,
+    onSort: (SortMode) -> Unit,
+    onPlay: (Int) -> Unit
 ) {
     var menuOpen by remember { mutableStateOf(false) }
-    Column(Modifier.fillMaxSize().padding(horizontal = 16.dp)) {
-        Spacer(Modifier.height(12.dp))
+    Column(Modifier.fillMaxSize().statusBarsPadding().padding(horizontal = 16.dp)) {
+        Spacer(Modifier.height(14.dp))
         Row(verticalAlignment = Alignment.CenterVertically) {
-            IconButton(onClick = onBack) { Icon(Icons.Default.ArrowBack, contentDescription = "Back", tint = TextMain) }
+            IconButton(onClick = onBack) {
+                Icon(Icons.Default.ArrowBack, contentDescription = "Back", tint = TextMain)
+            }
             Column(Modifier.weight(1f)) {
                 Text(album, color = TextMain, fontWeight = FontWeight.Bold, fontSize = 19.sp)
                 Text("${videos.size} videos", color = TextMuted, fontSize = 12.sp)
             }
             Box {
-                IconButton(onClick = { menuOpen = true }) { Icon(Icons.Default.Sort, contentDescription = "Sort", tint = TextMain) }
+                IconButton(onClick = { menuOpen = true }) {
+                    Icon(Icons.Default.Sort, contentDescription = "Sort", tint = TextMain)
+                }
                 DropdownMenu(expanded = menuOpen, onDismissRequest = { menuOpen = false }) {
-                    DropdownMenuItem(text = { Text("Name ${if (sortMode == SortMode.NAME) directionLabel(ascending) else ""}") }, onClick = { onSort(SortMode.NAME); menuOpen = false })
-                    DropdownMenuItem(text = { Text("Date ${if (sortMode == SortMode.DATE) directionLabel(ascending) else ""}") }, onClick = { onSort(SortMode.DATE); menuOpen = false })
-                    DropdownMenuItem(text = { Text("Size ${if (sortMode == SortMode.SIZE) directionLabel(ascending) else ""}") }, onClick = { onSort(SortMode.SIZE); menuOpen = false })
+                    DropdownMenuItem(
+                        text = { Text("Name ${if (sortMode == SortMode.NAME) directionLabel(ascending) else ""}") },
+                        onClick = { onSort(SortMode.NAME); menuOpen = false }
+                    )
+                    DropdownMenuItem(
+                        text = { Text("Date ${if (sortMode == SortMode.DATE) directionLabel(ascending) else ""}") },
+                        onClick = { onSort(SortMode.DATE); menuOpen = false }
+                    )
+                    DropdownMenuItem(
+                        text = { Text("Size ${if (sortMode == SortMode.SIZE) directionLabel(ascending) else ""}") },
+                        onClick = { onSort(SortMode.SIZE); menuOpen = false }
+                    )
                 }
             }
         }
-        LazyColumn(verticalArrangement = Arrangement.spacedBy(7.dp)) {
+        Spacer(Modifier.height(8.dp))
+        LazyColumn(verticalArrangement = Arrangement.spacedBy(8.dp)) {
             items(videos, key = { it.uri.toString() }) { video ->
                 val index = videos.indexOf(video)
                 Row(
-                    Modifier.fillMaxWidth().background(SurfaceDark, RoundedCornerShape(12.dp))
-                        .clickable { onPlay(index) }.padding(13.dp),
+                    Modifier.fillMaxWidth()
+                        .background(SurfaceDark, RoundedCornerShape(12.dp))
+                        .clickable { onPlay(index) }
+                        .padding(horizontal = 10.dp, vertical = 8.dp),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    Icon(Icons.Default.PlayArrow, contentDescription = null, tint = TextMuted)
-                    Spacer(Modifier.width(10.dp))
+                    VideoThumbnail(uri = video.uri)
+                    Spacer(Modifier.width(12.dp))
                     Column(Modifier.weight(1f)) {
-                        Text(video.name, color = TextMain, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                        Text("${formatBytes(video.size)} · ${formatDuration(video.duration)}", color = TextMuted, fontSize = 11.sp)
+                        Text(
+                            video.name,
+                            color = TextMain,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                            fontSize = 15.sp
+                        )
+                        Spacer(Modifier.height(4.dp))
+                        Text(
+                            formatDuration(video.duration),
+                            color = TextMuted,
+                            fontSize = 12.sp
+                        )
+                    }
+                    IconButton(onClick = { onPlay(index) }) {
+                        Icon(
+                            Icons.Default.MoreVert,
+                            contentDescription = "More",
+                            tint = TextMuted
+                        )
                     }
                 }
             }
@@ -274,12 +390,19 @@ private fun VideoListScreen(
 
 @Composable
 private fun VideoPlayerScreen(
-    videos: List<VideoEntry>, initialIndex: Int, player: ExoPlayer,
-    playbackMode: PlaybackMode, onModeChange: () -> Unit,
-    onBack: () -> Unit, onFloating: (Int) -> Unit
+    videos: List<VideoEntry>,
+    initialIndex: Int,
+    player: ExoPlayer,
+    playbackMode: PlaybackMode,
+    onModeChange: () -> Unit,
+    onBack: () -> Unit
 ) {
-    val pagerState = rememberPagerState(initialPage = initialIndex.coerceIn(0, (videos.size - 1).coerceAtLeast(0))) { videos.size }
+    val pagerState = rememberPagerState(
+        initialPage = initialIndex.coerceIn(0, (videos.size - 1).coerceAtLeast(0))
+    ) { videos.size }
     val coroutineScope = rememberCoroutineScope()
+    var settingsOpen by remember { mutableStateOf(false) }
+
     LaunchedEffect(videos, playbackMode) {
         player.repeatMode = if (playbackMode == PlaybackMode.REPEAT) Player.REPEAT_MODE_ONE else Player.REPEAT_MODE_ALL
         player.clearMediaItems()
@@ -289,6 +412,7 @@ private fun VideoPlayerScreen(
         player.playWhenReady = true
         player.play()
     }
+
     DisposableEffect(player, playbackMode) {
         val listener = object : Player.Listener {
             override fun onMediaItemTransition(mediaItem: MediaItem?, reason: Int) {
@@ -301,6 +425,7 @@ private fun VideoPlayerScreen(
         player.addListener(listener)
         onDispose { player.removeListener(listener) }
     }
+
     LaunchedEffect(pagerState.currentPage) {
         if (videos.isNotEmpty() && player.currentMediaItemIndex != pagerState.currentPage) {
             player.seekTo(pagerState.currentPage, 0L)
@@ -308,34 +433,68 @@ private fun VideoPlayerScreen(
             player.play()
         }
     }
+
     Box(Modifier.fillMaxSize().background(Color.Black)) {
         VerticalPager(state = pagerState, modifier = Modifier.fillMaxSize()) { page ->
             Box(Modifier.fillMaxSize()) {
                 if (page == pagerState.currentPage) {
                     AndroidView(
                         modifier = Modifier.fillMaxSize(),
-                        factory = { ctx -> PlayerView(ctx).apply {
-                            this.player = player
-                            useController = true
-                            resizeMode = AspectRatioFrameLayout.RESIZE_MODE_FIT
-                            setShowBuffering(PlayerView.SHOW_BUFFERING_WHEN_PLAYING)
-                        } },
+                        factory = { ctx ->
+                            PlayerView(ctx).apply {
+                                this.player = player
+                                useController = true
+                                resizeMode = AspectRatioFrameLayout.RESIZE_MODE_FIT
+                                setShowBuffering(PlayerView.SHOW_BUFFERING_WHEN_PLAYING)
+                            }
+                        },
                         update = { it.player = player }
                     )
                 }
-                Column(Modifier.align(Alignment.BottomStart).fillMaxWidth().background(Color(0x66000000)).padding(16.dp)) {
+                Column(
+                    Modifier.align(Alignment.BottomStart)
+                        .fillMaxWidth()
+                        .background(Color(0x66000000))
+                        .padding(16.dp)
+                ) {
                     Text(videos[page].name, color = TextMain, maxLines = 1, overflow = TextOverflow.Ellipsis)
                     Text("${page + 1} / ${videos.size}", color = TextMuted, fontSize = 12.sp)
                 }
             }
         }
-        Row(Modifier.align(Alignment.TopStart).fillMaxWidth().background(Color(0x55000000)).padding(8.dp), verticalAlignment = Alignment.CenterVertically) {
-            IconButton(onClick = onBack) { Icon(Icons.Default.ArrowBack, contentDescription = "Back", tint = TextMain) }
-            Text("SATOBII PLAYER", color = TextMain, fontWeight = FontWeight.Bold, modifier = Modifier.weight(1f))
-            TextButton(onClick = onModeChange) {
-                Text(if (playbackMode == PlaybackMode.REPEAT) "Repeat" else "Auto next", color = TextMain)
+
+        Row(
+            Modifier.align(Alignment.TopStart)
+                .fillMaxWidth()
+                .statusBarsPadding()
+                .padding(top = 12.dp, start = 8.dp, end = 8.dp),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            IconButton(onClick = onBack) {
+                Icon(Icons.Default.ArrowBack, contentDescription = "Back", tint = TextMain)
             }
-            TextButton(onClick = { onFloating(pagerState.currentPage) }) { Text("Float", color = TextMain) }
+            Box {
+                IconButton(onClick = { settingsOpen = true }) {
+                    Icon(Icons.Default.Settings, contentDescription = "Settings", tint = TextMain)
+                }
+                DropdownMenu(expanded = settingsOpen, onDismissRequest = { settingsOpen = false }) {
+                    Row(
+                        Modifier.padding(horizontal = 16.dp, vertical = 10.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(16.dp)
+                    ) {
+                        Text("Auto next", color = TextMain)
+                        Switch(
+                            checked = playbackMode == PlaybackMode.AUTO_NEXT,
+                            onCheckedChange = {
+                                onModeChange()
+                                settingsOpen = false
+                            }
+                        )
+                    }
+                }
+            }
         }
     }
 }
@@ -423,5 +582,5 @@ private fun formatBytes(bytes: Long): String = when {
 }
 private fun formatDuration(ms: Long): String {
     val total = ms / 1000
-    return "%d:%02d".format(total / 60, total % 60)
+    return "%02d:%02d".format(total / 60, total % 60)
 }
