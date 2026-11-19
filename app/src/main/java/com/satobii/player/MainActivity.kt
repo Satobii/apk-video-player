@@ -11,6 +11,7 @@ import android.os.Build
 import android.os.Bundle
 import android.provider.MediaStore
 import android.provider.Settings
+import android.util.LruCache
 import android.util.Size
 import android.widget.Toast
 import androidx.activity.ComponentActivity
@@ -18,6 +19,21 @@ import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.animation.AnimatedContent
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.core.Spring
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.spring
+import androidx.compose.animation.core.tween
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.scaleIn
+import androidx.compose.animation.scaleOut
+import androidx.compose.animation.slideInHorizontally
+import androidx.compose.animation.slideInVertically
+import androidx.compose.animation.slideOutHorizontally
+import androidx.compose.animation.slideOutVertically
+import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -26,6 +42,7 @@ import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.pager.VerticalPager
 import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.foundation.shape.CircleShape
@@ -46,6 +63,7 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.scale
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.input.pointer.pointerInput
@@ -72,6 +90,13 @@ private val SurfaceDark = Color(0xFF1D1D1D)
 private val ThumbPlaceholder = Color(0xFF3A3A3A)
 private val TextMain = Color(0xFFF4F4F4)
 private val TextMuted = Color(0xFF9B9B9B)
+
+private object ThumbnailCache {
+    private val maxCacheKb = ((Runtime.getRuntime().maxMemory() / 1024L) / 8L).toInt().coerceAtLeast(4096)
+    val cache: LruCache<String, Bitmap> = object : LruCache<String, Bitmap>(maxCacheKb) {
+        override fun sizeOf(key: String, value: Bitmap): Int = value.byteCount / 1024
+    }
+}
 
 data class VideoEntry(
     val uri: Uri,
@@ -140,9 +165,11 @@ private fun AstraApp() {
         if (hasPermission) {
             val result = withContext(Dispatchers.IO) { queryVideos() }
             allVideos = result
-            albums = result.groupBy { it.albumId }
-                .map { (id, items) -> AlbumEntry(id, items.first().album, items.size, items.firstOrNull()?.uri) }
-                .sortedBy { it.name.lowercase(Locale.ROOT) }
+            albums = withContext(Dispatchers.Default) {
+                result.groupBy { it.albumId }
+                    .map { (id, items) -> AlbumEntry(id, items.first().album, items.size, items.firstOrNull()?.uri) }
+                    .sortedBy { it.name.lowercase(Locale.ROOT) }
+            }
         }
     }
 
@@ -164,6 +191,12 @@ private fun AstraApp() {
         screen = "albums"
     }
 
+    val sortedAlbumVideos by remember(allVideos, selectedAlbum, sortMode, ascending) {
+        derivedStateOf {
+            sortVideos(allVideos.filter { it.albumId == selectedAlbum }, sortMode, ascending)
+        }
+    }
+
     MaterialTheme(
         colorScheme = darkColorScheme(
             background = Bg,
@@ -182,49 +215,77 @@ private fun AstraApp() {
                         permissionLauncher.launch(Manifest.permission.READ_EXTERNAL_STORAGE)
                     }
                 }
-            } else when (screen) {
-                "albums" -> AlbumScreen(albums, allVideos.size, onRefresh = { refreshToken++ }) { album ->
-                    selectedAlbum = album.id
-                    val videos = sortVideos(allVideos.filter { it.albumId == album.id }, sortMode, ascending)
-                    activeVideos = videos
-                    startAt = 0
-                    screen = "videos"
-                }
-
-                "videos" -> VideoListScreen(
-                    album = albums.firstOrNull { it.id == selectedAlbum }?.name ?: "Videos",
-                    videos = sortVideos(allVideos.filter { it.albumId == selectedAlbum }, sortMode, ascending),
-                    sortMode = sortMode,
-                    ascending = ascending,
-                    onBack = { screen = "albums" },
-                    onSort = { mode ->
-                        if (sortMode == mode) ascending = !ascending
-                        else {
-                            sortMode = mode
-                            ascending = mode == SortMode.NAME
+            } else {
+                AnimatedContent(
+                    targetState = screen,
+                    transitionSpec = {
+                        val goingForward = (initialState == "albums" && targetState == "videos") ||
+                            (initialState == "videos" && targetState == "player")
+                        if (goingForward) {
+                            (fadeIn(tween(200)) + slideInHorizontally(tween(240)) { it / 6 }) togetherWith
+                                (fadeOut(tween(160)) + slideOutHorizontally(tween(200)) { -it / 8 })
+                        } else {
+                            (fadeIn(tween(200)) + slideInHorizontally(tween(240)) { -it / 6 }) togetherWith
+                                (fadeOut(tween(160)) + slideOutHorizontally(tween(200)) { it / 8 })
                         }
                     },
-                    onPlay = { index ->
-                        activeVideos = sortVideos(allVideos.filter { it.albumId == selectedAlbum }, sortMode, ascending)
-                        startAt = index
-                        miniPlayerActive = false
-                        screen = "player"
-                    }
-                )
+                    label = "screen_transition"
+                ) { currentScreen ->
+                    when (currentScreen) {
+                        "albums" -> AlbumScreen(albums, allVideos.size, onRefresh = { refreshToken++ }) { album ->
+                            selectedAlbum = album.id
+                            activeVideos = sortVideos(allVideos.filter { it.albumId == album.id }, sortMode, ascending)
+                            startAt = 0
+                            screen = "videos"
+                        }
 
-                "player" -> VideoPlayerScreen(
-                    videos = activeVideos,
-                    initialIndex = startAt,
-                    player = player,
-                    playbackMode = playbackMode,
-                    onModeChange = {
-                        playbackMode = if (playbackMode == PlaybackMode.REPEAT) PlaybackMode.AUTO_NEXT else PlaybackMode.REPEAT
-                    },
-                    onBack = leavePlayerToPlaylist
-                )
+                        "videos" -> VideoListScreen(
+                            album = albums.firstOrNull { it.id == selectedAlbum }?.name ?: "Videos",
+                            videos = sortedAlbumVideos,
+                            sortMode = sortMode,
+                            ascending = ascending,
+                            onBack = { screen = "albums" },
+                            onSort = { mode ->
+                                if (sortMode == mode) ascending = !ascending
+                                else {
+                                    sortMode = mode
+                                    ascending = mode == SortMode.NAME
+                                }
+                            },
+                            onPlay = { index ->
+                                activeVideos = sortedAlbumVideos
+                                startAt = index
+                                miniPlayerActive = false
+                                screen = "player"
+                            }
+                        )
+
+                        "player" -> VideoPlayerScreen(
+                            videos = activeVideos,
+                            initialIndex = startAt,
+                            player = player,
+                            playbackMode = playbackMode,
+                            onModeChange = {
+                                playbackMode = if (playbackMode == PlaybackMode.REPEAT) PlaybackMode.AUTO_NEXT else PlaybackMode.REPEAT
+                            },
+                            onBack = leavePlayerToPlaylist
+                        )
+                    }
+                }
             }
 
-            if (hasPermission && screen != "player" && miniPlayerActive) {
+            AnimatedVisibility(
+                visible = hasPermission && screen != "player" && miniPlayerActive,
+                enter = fadeIn(tween(200)) + scaleIn(
+                    initialScale = 0.85f,
+                    animationSpec = spring(dampingRatio = Spring.DampingRatioMediumBouncy, stiffness = Spring.StiffnessMediumLow)
+                ) + slideInVertically(tween(220)) { it / 3 },
+                exit = fadeOut(tween(160)) + scaleOut(targetScale = 0.88f, animationSpec = tween(160)) + slideOutVertically(tween(180)) { it / 3 },
+                modifier = Modifier
+                    .align(Alignment.BottomEnd)
+                    .navigationBarsPadding()
+                    .padding(end = 14.dp, bottom = 76.dp)
+            ) {
                 MiniPlayerOverlay(
                     player = player,
                     onExpand = {
@@ -233,11 +294,7 @@ private fun AstraApp() {
                         miniPlayerActive = false
                         screen = "player"
                     },
-                    onClose = closeMiniPlayer,
-                    modifier = Modifier
-                        .align(Alignment.BottomEnd)
-                        .navigationBarsPadding()
-                        .padding(end = 14.dp, bottom = 76.dp)
+                    onClose = closeMiniPlayer
                 )
             }
         }
@@ -334,12 +391,34 @@ private fun AlbumScreen(
                 Text("No videos found.", color = TextMuted)
             }
         } else {
-            LazyColumn(verticalArrangement = Arrangement.spacedBy(9.dp)) {
+            LazyColumn(
+                verticalArrangement = Arrangement.spacedBy(9.dp),
+                contentPadding = PaddingValues(bottom = 24.dp)
+            ) {
                 items(albums, key = { it.id }) { album ->
+                    var pressed by remember { mutableStateOf(false) }
+                    val scale by animateFloatAsState(
+                        targetValue = if (pressed) 0.985f else 1f,
+                        animationSpec = spring(stiffness = Spring.StiffnessHigh),
+                        label = "album_scale"
+                    )
                     Row(
                         Modifier.fillMaxWidth()
+                            .scale(scale)
+                            .animateItem(
+                                placementSpec = spring(dampingRatio = Spring.DampingRatioNoBouncy, stiffness = Spring.StiffnessMediumLow)
+                            )
                             .background(SurfaceDark, RoundedCornerShape(14.dp))
-                            .clickable { onSelect(album) }
+                            .pointerInput(album.id) {
+                                detectTapGestures(
+                                    onPress = {
+                                        pressed = true
+                                        tryAwaitRelease()
+                                        pressed = false
+                                    },
+                                    onTap = { onSelect(album) }
+                                )
+                            }
                             .padding(16.dp),
                         verticalAlignment = Alignment.CenterVertically
                     ) {
@@ -360,18 +439,25 @@ private fun AlbumScreen(
 @Composable
 private fun VideoThumbnail(uri: Uri) {
     val context = LocalContext.current
-    var bitmap by remember(uri) { mutableStateOf<Bitmap?>(null) }
+    val cacheKey = remember(uri) { uri.toString() }
+    var bitmap by remember(cacheKey) { mutableStateOf(ThumbnailCache.cache.get(cacheKey)) }
 
-    LaunchedEffect(uri) {
-        bitmap = withContext(Dispatchers.IO) {
-            try {
-                if (Build.VERSION.SDK_INT >= 29) {
-                    context.contentResolver.loadThumbnail(uri, Size(240, 160), null)
-                } else {
+    LaunchedEffect(cacheKey) {
+        if (bitmap == null) {
+            val loaded = withContext(Dispatchers.IO) {
+                try {
+                    if (Build.VERSION.SDK_INT >= 29) {
+                        context.contentResolver.loadThumbnail(uri, Size(240, 160), null)
+                    } else {
+                        null
+                    }
+                } catch (_: Exception) {
                     null
                 }
-            } catch (_: Exception) {
-                null
+            }
+            if (loaded != null) {
+                ThumbnailCache.cache.put(cacheKey, loaded)
+                bitmap = loaded
             }
         }
     }
@@ -384,14 +470,21 @@ private fun VideoThumbnail(uri: Uri) {
         contentAlignment = Alignment.Center
     ) {
         val currentBitmap = bitmap
-        if (currentBitmap != null) {
-            Image(
-                bitmap = currentBitmap.asImageBitmap(),
-                contentDescription = null,
-                contentScale = ContentScale.Crop,
-                modifier = Modifier.fillMaxSize()
-            )
-        } else {
+        AnimatedVisibility(
+            visible = currentBitmap != null,
+            enter = fadeIn(tween(180)),
+            exit = fadeOut(tween(120))
+        ) {
+            if (currentBitmap != null) {
+                Image(
+                    bitmap = currentBitmap.asImageBitmap(),
+                    contentDescription = null,
+                    contentScale = ContentScale.Crop,
+                    modifier = Modifier.fillMaxSize()
+                )
+            }
+        }
+        if (currentBitmap == null) {
             Icon(
                 imageVector = Icons.Default.PlayArrow,
                 contentDescription = null,
@@ -444,13 +537,34 @@ private fun VideoListScreen(
             }
         }
         Spacer(Modifier.height(8.dp))
-        LazyColumn(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            items(videos, key = { it.uri.toString() }) { video ->
-                val index = videos.indexOf(video)
+        LazyColumn(
+            verticalArrangement = Arrangement.spacedBy(8.dp),
+            contentPadding = PaddingValues(bottom = 24.dp)
+        ) {
+            itemsIndexed(videos, key = { _, video -> video.uri.toString() }) { index, video ->
+                var pressed by remember { mutableStateOf(false) }
+                val scale by animateFloatAsState(
+                    targetValue = if (pressed) 0.985f else 1f,
+                    animationSpec = spring(stiffness = Spring.StiffnessHigh),
+                    label = "video_item_scale"
+                )
                 Row(
                     Modifier.fillMaxWidth()
+                        .scale(scale)
+                        .animateItem(
+                            placementSpec = spring(dampingRatio = Spring.DampingRatioNoBouncy, stiffness = Spring.StiffnessMediumLow)
+                        )
                         .background(SurfaceDark, RoundedCornerShape(12.dp))
-                        .clickable { onPlay(index) }
+                        .pointerInput(video.uri) {
+                            detectTapGestures(
+                                onPress = {
+                                    pressed = true
+                                    tryAwaitRelease()
+                                    pressed = false
+                                },
+                                onTap = { onPlay(index) }
+                            )
+                        }
                         .padding(horizontal = 10.dp, vertical = 8.dp),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
@@ -604,56 +718,68 @@ private fun VideoPlayerScreen(
             }
         }
 
-        if (controlsVisible && activeVideo != null) {
-            Row(
-                Modifier.align(Alignment.TopStart)
-                    .fillMaxWidth()
-                    .background(Color(0x99000000))
-                    .statusBarsPadding()
-                    .padding(top = 12.dp, start = 8.dp, end = 8.dp, bottom = 8.dp),
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                IconButton(onClick = onBack) {
-                    Icon(Icons.Default.ArrowBack, contentDescription = "Back", tint = TextMain)
-                }
-                Text(
-                    text = activeVideo.name,
-                    color = TextMain,
-                    fontSize = 15.sp,
-                    fontWeight = FontWeight.Medium,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                    modifier = Modifier.weight(1f).padding(horizontal = 6.dp)
-                )
-                Box {
-                    IconButton(onClick = {
-                        settingsOpen = true
-                        touchTick++
-                    }) {
-                        Icon(Icons.Default.Settings, contentDescription = "Settings", tint = TextMain)
+        AnimatedVisibility(
+            visible = controlsVisible && activeVideo != null,
+            enter = fadeIn(tween(180)) + slideInVertically(tween(200)) { -it / 2 },
+            exit = fadeOut(tween(150)) + slideOutVertically(tween(180)) { -it / 2 },
+            modifier = Modifier.align(Alignment.TopStart)
+        ) {
+            if (activeVideo != null) {
+                Row(
+                    Modifier.fillMaxWidth()
+                        .background(Color(0x99000000))
+                        .statusBarsPadding()
+                        .padding(top = 12.dp, start = 8.dp, end = 8.dp, bottom = 8.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    IconButton(onClick = onBack) {
+                        Icon(Icons.Default.ArrowBack, contentDescription = "Back", tint = TextMain)
                     }
-                    DropdownMenu(expanded = settingsOpen, onDismissRequest = { settingsOpen = false }) {
-                        Row(
-                            Modifier.padding(horizontal = 16.dp, vertical = 10.dp),
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.spacedBy(16.dp)
-                        ) {
-                            Text("Auto next", color = TextMain)
-                            Switch(
-                                checked = playbackMode == PlaybackMode.AUTO_NEXT,
-                                onCheckedChange = {
-                                    onModeChange()
-                                    settingsOpen = false
-                                }
-                            )
+                    Text(
+                        text = activeVideo.name,
+                        color = TextMain,
+                        fontSize = 15.sp,
+                        fontWeight = FontWeight.Medium,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.weight(1f).padding(horizontal = 6.dp)
+                    )
+                    Box {
+                        IconButton(onClick = {
+                            settingsOpen = true
+                            touchTick++
+                        }) {
+                            Icon(Icons.Default.Settings, contentDescription = "Settings", tint = TextMain)
+                        }
+                        DropdownMenu(expanded = settingsOpen, onDismissRequest = { settingsOpen = false }) {
+                            Row(
+                                Modifier.padding(horizontal = 16.dp, vertical = 10.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(16.dp)
+                            ) {
+                                Text("Auto next", color = TextMain)
+                                Switch(
+                                    checked = playbackMode == PlaybackMode.AUTO_NEXT,
+                                    onCheckedChange = {
+                                        onModeChange()
+                                        settingsOpen = false
+                                    }
+                                )
+                            }
                         }
                     }
                 }
             }
+        }
 
+        AnimatedVisibility(
+            visible = controlsVisible && activeVideo != null,
+            enter = fadeIn(tween(180)) + slideInVertically(tween(200)) { it / 2 },
+            exit = fadeOut(tween(150)) + slideOutVertically(tween(180)) { it / 2 },
+            modifier = Modifier.align(Alignment.BottomStart)
+        ) {
             Column(
-                Modifier.align(Alignment.BottomStart)
-                    .fillMaxWidth()
+                Modifier.fillMaxWidth()
                     .background(Color(0xAA000000))
                     .navigationBarsPadding()
                     .padding(horizontal = 16.dp, vertical = 12.dp)
