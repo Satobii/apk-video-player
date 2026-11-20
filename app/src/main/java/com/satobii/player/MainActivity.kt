@@ -56,6 +56,7 @@ import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Replay5
+import androidx.compose.material.icons.filled.RotateRight
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Sort
 import androidx.compose.material3.*
@@ -65,6 +66,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
@@ -73,7 +75,9 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
+import androidx.media3.common.C
 import androidx.media3.common.MediaItem
+import androidx.media3.common.PlaybackException
 import androidx.media3.common.Player
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.ui.AspectRatioFrameLayout
@@ -89,6 +93,11 @@ private val SurfaceDark = Color(0xFF1D1D1D)
 private val ThumbPlaceholder = Color(0xFF3A3A3A)
 private val TextMain = Color(0xFFF4F4F4)
 private val TextMuted = Color(0xFF9B9B9B)
+
+private const val PREFS_NAME = "astra_player_prefs"
+private const val KEY_PERF_MODE = "perf_mode"
+private const val KEY_SORT_MODE = "sort_mode"
+private const val KEY_SORT_ASC = "sort_asc"
 
 private object ThumbnailCache {
     private val maxCacheKb = ((Runtime.getRuntime().maxMemory() / 1024L) / 5L).toInt().coerceAtLeast(8192)
@@ -117,6 +126,38 @@ enum class PerformanceMode(val label: String, val thumbWidth: Int, val thumbHeig
     HIGH("High (Sharp + Animation)", 320, 192, true)
 }
 
+private fun loadSavedPerfMode(context: Context): PerformanceMode {
+    val saved = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        .getString(KEY_PERF_MODE, PerformanceMode.MEDIUM.name)
+    return PerformanceMode.entries.firstOrNull { it.name == saved } ?: PerformanceMode.MEDIUM
+}
+
+private fun savePerfMode(context: Context, mode: PerformanceMode) {
+    context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        .edit()
+        .putString(KEY_PERF_MODE, mode.name)
+        .apply()
+}
+
+private fun loadSavedSortMode(context: Context): SortMode {
+    val saved = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        .getString(KEY_SORT_MODE, SortMode.DATE.name)
+    return SortMode.entries.firstOrNull { it.name == saved } ?: SortMode.DATE
+}
+
+private fun loadSavedSortAsc(context: Context): Boolean {
+    return context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        .getBoolean(KEY_SORT_ASC, false)
+}
+
+private fun saveSortSettings(context: Context, mode: SortMode, ascending: Boolean) {
+    context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        .edit()
+        .putString(KEY_SORT_MODE, mode.name)
+        .putBoolean(KEY_SORT_ASC, ascending)
+        .apply()
+}
+
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -142,14 +183,29 @@ private fun AstraApp() {
     var allVideos by remember { mutableStateOf<List<VideoEntry>>(emptyList()) }
     var selectedAlbum by remember { mutableStateOf<Long?>(null) }
     var screen by remember { mutableStateOf("albums") }
-    var sortMode by remember { mutableStateOf(SortMode.DATE) }
-    var ascending by remember { mutableStateOf(false) }
+    var sortMode by remember { mutableStateOf(loadSavedSortMode(context)) }
+    var ascending by remember { mutableStateOf(loadSavedSortAsc(context)) }
     var playbackMode by remember { mutableStateOf(PlaybackMode.REPEAT) }
-    var perfMode by remember { mutableStateOf(PerformanceMode.MEDIUM) }
+    var perfMode by remember { mutableStateOf(loadSavedPerfMode(context)) }
     var activeVideos by remember { mutableStateOf<List<VideoEntry>>(emptyList()) }
     var startAt by remember { mutableIntStateOf(0) }
     var miniPlayerActive by remember { mutableStateOf(false) }
     var refreshToken by remember { mutableIntStateOf(0) }
+
+    val updatePerfMode: (PerformanceMode) -> Unit = { mode ->
+        perfMode = mode
+        savePerfMode(context, mode)
+    }
+
+    val updateSort: (SortMode) -> Unit = { mode ->
+        if (sortMode == mode) {
+            ascending = !ascending
+        } else {
+            sortMode = mode
+            ascending = mode == SortMode.NAME
+        }
+        saveSortSettings(context, sortMode, ascending)
+    }
 
     val player = remember {
         ExoPlayer.Builder(context).build().apply {
@@ -227,7 +283,7 @@ private fun AstraApp() {
                             albums = albums,
                             total = allVideos.size,
                             perfMode = perfMode,
-                            onSelectPerfMode = { perfMode = it },
+                            onSelectPerfMode = updatePerfMode,
                             onRefresh = { refreshToken++ }
                         ) { album ->
                             selectedAlbum = album.id
@@ -243,13 +299,7 @@ private fun AstraApp() {
                             ascending = ascending,
                             perfMode = perfMode,
                             onBack = { screen = "albums" },
-                            onSort = { mode ->
-                                if (sortMode == mode) ascending = !ascending
-                                else {
-                                    sortMode = mode
-                                    ascending = mode == SortMode.NAME
-                                }
-                            },
+                            onSort = updateSort,
                             onPlay = { index ->
                                 activeVideos = sortedAlbumVideos
                                 startAt = index
@@ -631,6 +681,15 @@ private fun VideoListScreen(
     }
 }
 
+private fun resolveDurationMs(player: ExoPlayer, fallbackDurationMs: Long): Long {
+    val playerDur = player.duration
+    return when {
+        playerDur != C.TIME_UNSET && playerDur > 0L -> playerDur
+        fallbackDurationMs > 0L -> fallbackDurationMs
+        else -> 0L
+    }
+}
+
 @Composable
 private fun VideoPlayerScreen(
     videos: List<VideoEntry>,
@@ -641,35 +700,37 @@ private fun VideoPlayerScreen(
     onModeChange: () -> Unit,
     onBack: () -> Unit
 ) {
-    val pagerState = rememberPagerState(
-        initialPage = initialIndex.coerceIn(0, (videos.size - 1).coerceAtLeast(0))
-    ) { videos.size }
+    val safeInitial = initialIndex.coerceIn(0, (videos.size - 1).coerceAtLeast(0))
+    val pagerState = rememberPagerState(initialPage = safeInitial) { videos.size }
     val coroutineScope = rememberCoroutineScope()
+    val activeVideo = videos.getOrNull(pagerState.currentPage)
+
     var controlsVisible by remember { mutableStateOf(false) }
     var settingsOpen by remember { mutableStateOf(false) }
     var isPlaying by remember { mutableStateOf(player.isPlaying) }
     var currentPos by remember { mutableLongStateOf(0L) }
-    var duration by remember { mutableLongStateOf(0L) }
+    var duration by remember { mutableLongStateOf(activeVideo?.duration?.coerceAtLeast(0L) ?: 0L) }
     var touchTick by remember { mutableIntStateOf(0) }
+    val rotations = remember { mutableStateMapOf<Uri, Float>() }
+    val activeRotation = activeVideo?.let { rotations[it.uri] ?: 0f } ?: 0f
 
-    LaunchedEffect(videos, playbackMode) {
-        player.repeatMode = if (playbackMode == PlaybackMode.REPEAT) Player.REPEAT_MODE_ONE else Player.REPEAT_MODE_ALL
-        val targetIndex = pagerState.currentPage
+    LaunchedEffect(videos) {
+        if (videos.isEmpty()) return@LaunchedEffect
         val alreadyLoadedSameQueue = player.mediaItemCount == videos.size &&
             videos.indices.all { idx -> player.getMediaItemAt(idx).localConfiguration?.uri == videos[idx].uri }
         if (!alreadyLoadedSameQueue) {
-            player.clearMediaItems()
-            videos.forEach { player.addMediaItem(MediaItem.fromUri(it.uri)) }
+            player.setMediaItems(videos.map { MediaItem.fromUri(it.uri) }, safeInitial, 0L)
             player.prepare()
-            player.seekTo(targetIndex, player.currentPosition.coerceAtLeast(0L))
-        } else if (player.currentMediaItemIndex != targetIndex) {
-            player.seekTo(targetIndex, 0L)
         }
         player.playWhenReady = true
         player.play()
     }
 
-    DisposableEffect(player, playbackMode) {
+    LaunchedEffect(playbackMode) {
+        player.repeatMode = if (playbackMode == PlaybackMode.REPEAT) Player.REPEAT_MODE_ONE else Player.REPEAT_MODE_ALL
+    }
+
+    DisposableEffect(player, playbackMode, activeVideo?.duration) {
         val listener = object : Player.Listener {
             override fun onIsPlayingChanged(playing: Boolean) {
                 isPlaying = playing
@@ -677,26 +738,57 @@ private fun VideoPlayerScreen(
 
             override fun onMediaItemTransition(mediaItem: MediaItem?, reason: Int) {
                 currentPos = 0L
-                duration = player.duration.coerceAtLeast(0L)
+                val fallback = videos.getOrNull(player.currentMediaItemIndex)?.duration ?: activeVideo?.duration ?: 0L
+                duration = resolveDurationMs(player, fallback)
                 if (playbackMode == PlaybackMode.AUTO_NEXT && reason == Player.MEDIA_ITEM_TRANSITION_REASON_AUTO) {
                     val next = player.currentMediaItemIndex
-                    if (next >= 0) coroutineScope.launch { pagerState.animateScrollToPage(next) }
+                    if (next in videos.indices && next != pagerState.currentPage) {
+                        coroutineScope.launch { pagerState.animateScrollToPage(next) }
+                    }
                 }
             }
 
             override fun onPlaybackStateChanged(playbackState: Int) {
-                duration = player.duration.coerceAtLeast(0L)
+                val fallback = videos.getOrNull(player.currentMediaItemIndex)?.duration ?: activeVideo?.duration ?: 0L
+                duration = resolveDurationMs(player, fallback)
+                isPlaying = player.isPlaying
+                if (playbackState == Player.STATE_ENDED && playbackMode == PlaybackMode.AUTO_NEXT) {
+                    val nextIndex = (pagerState.currentPage + 1).takeIf { it < videos.size }
+                    if (nextIndex != null) {
+                        coroutineScope.launch { pagerState.animateScrollToPage(nextIndex) }
+                    }
+                }
+            }
+
+            override fun onPlayerError(error: PlaybackException) {
+                val targetPage = pagerState.currentPage
+                val pos = player.currentPosition.coerceAtLeast(0L)
+                if (targetPage in videos.indices) {
+                    player.seekTo(targetPage, pos)
+                    player.prepare()
+                    player.playWhenReady = true
+                    player.play()
+                }
             }
         }
         player.addListener(listener)
         onDispose { player.removeListener(listener) }
     }
 
-    LaunchedEffect(pagerState.currentPage) {
+    LaunchedEffect(pagerState.currentPage, activeVideo?.uri) {
         controlsVisible = false
         settingsOpen = false
-        if (videos.isNotEmpty() && player.currentMediaItemIndex != pagerState.currentPage) {
-            player.seekTo(pagerState.currentPage, 0L)
+        val targetPage = pagerState.currentPage
+        val targetVideo = videos.getOrNull(targetPage)
+        currentPos = 0L
+        duration = targetVideo?.duration?.coerceAtLeast(0L) ?: 0L
+        if (targetVideo != null && player.mediaItemCount == videos.size) {
+            if (player.currentMediaItemIndex != targetPage) {
+                player.seekTo(targetPage, 0L)
+            }
+            if (player.playbackState == Player.STATE_IDLE) {
+                player.prepare()
+            }
             player.playWhenReady = true
             player.play()
         }
@@ -709,16 +801,14 @@ private fun VideoPlayerScreen(
         }
     }
 
-    LaunchedEffect(player, controlsVisible) {
+    LaunchedEffect(player, controlsVisible, activeVideo?.duration) {
         while (controlsVisible) {
             currentPos = player.currentPosition.coerceAtLeast(0L)
-            duration = player.duration.coerceAtLeast(0L)
+            duration = resolveDurationMs(player, activeVideo?.duration ?: 0L)
             isPlaying = player.isPlaying
             delay(250)
         }
     }
-
-    val activeVideo = videos.getOrNull(pagerState.currentPage)
 
     Box(
         Modifier.fillMaxSize()
@@ -734,19 +824,31 @@ private fun VideoPlayerScreen(
             }
     ) {
         VerticalPager(state = pagerState, modifier = Modifier.fillMaxSize()) { page ->
-            Box(Modifier.fillMaxSize()) {
-                if (page == pagerState.currentPage) {
+            val pageVideo = videos.getOrNull(page)
+            val isCurrentPage = page == pagerState.currentPage
+            val pageRotation = if (isCurrentPage && pageVideo != null) (rotations[pageVideo.uri] ?: 0f) else 0f
+            Box(
+                Modifier.fillMaxSize().background(Color.Black),
+                contentAlignment = Alignment.Center
+            ) {
+                if (isCurrentPage) {
                     AndroidView(
-                        modifier = Modifier.fillMaxSize(),
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .graphicsLayer { rotationZ = pageRotation },
                         factory = { ctx ->
                             PlayerView(ctx).apply {
                                 this.player = player
                                 useController = false
                                 resizeMode = AspectRatioFrameLayout.RESIZE_MODE_FIT
-                                setShowBuffering(PlayerView.SHOW_BUFFERING_WHEN_PLAYING)
+                                setShowBuffering(PlayerView.SHOW_BUFFERING_ALWAYS)
                             }
                         },
-                        update = { it.player = player }
+                        update = { view ->
+                            if (view.player !== player) {
+                                view.player = player
+                            }
+                        }
                     )
                 }
             }
@@ -825,7 +927,8 @@ private fun VideoPlayerScreen(
                     .navigationBarsPadding()
                     .padding(horizontal = 16.dp, vertical = 12.dp)
             ) {
-                val safeDuration = duration.coerceAtLeast(1L)
+                val effectiveDuration = if (duration > 0L) duration else (activeVideo?.duration?.coerceAtLeast(0L) ?: 0L)
+                val safeDuration = effectiveDuration.coerceAtLeast(1L)
                 val progress = (currentPos.toFloat() / safeDuration.toFloat()).coerceIn(0f, 1f)
                 Slider(
                     value = progress,
@@ -846,7 +949,7 @@ private fun VideoPlayerScreen(
                     horizontalArrangement = Arrangement.SpaceBetween
                 ) {
                     Text(formatDuration(currentPos), color = TextMuted, fontSize = 12.sp)
-                    Text(formatDuration(duration), color = TextMuted, fontSize = 12.sp)
+                    Text(formatDuration(effectiveDuration), color = TextMuted, fontSize = 12.sp)
                 }
                 Spacer(Modifier.height(6.dp))
                 Row(
@@ -880,7 +983,7 @@ private fun VideoPlayerScreen(
                     }
                     IconButton(onClick = {
                         touchTick++
-                        val maxPos = if (duration > 0L) duration else player.currentPosition + 5000L
+                        val maxPos = if (effectiveDuration > 0L) effectiveDuration else player.currentPosition + 5000L
                         val target = (player.currentPosition + 5000L).coerceAtMost(maxPos)
                         player.seekTo(target)
                         currentPos = target
@@ -890,6 +993,21 @@ private fun VideoPlayerScreen(
                             contentDescription = "Forward 5s",
                             tint = TextMain,
                             modifier = Modifier.size(32.dp)
+                        )
+                    }
+                    IconButton(onClick = {
+                        touchTick++
+                        val currentUri = activeVideo?.uri
+                        if (currentUri != null) {
+                            val currentDeg = rotations[currentUri] ?: 0f
+                            rotations[currentUri] = (currentDeg + 90f) % 360f
+                        }
+                    }) {
+                        Icon(
+                            Icons.Default.RotateRight,
+                            contentDescription = "Rotate video (${activeRotation.toInt()}°)",
+                            tint = TextMain,
+                            modifier = Modifier.size(30.dp)
                         )
                     }
                 }
@@ -995,6 +1113,6 @@ private fun formatBytes(bytes: Long): String = when {
     else -> "${bytes / 1_000} KB"
 }
 private fun formatDuration(ms: Long): String {
-    val total = ms / 1000
+    val total = (ms / 1000).coerceAtLeast(0L)
     return "%02d:%02d".format(total / 60, total % 60)
 }
