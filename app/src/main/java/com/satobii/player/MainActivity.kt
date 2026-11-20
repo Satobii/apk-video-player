@@ -322,7 +322,7 @@ private fun AstraApp() {
                     }
                 }
 
-                if (perfMode.animationsEnabled) {
+                if (perfMode.animationsEnabled && screen != "player") {
                     AnimatedContent(
                         targetState = screen,
                         transitionSpec = {
@@ -827,27 +827,15 @@ private fun VideoPlayerScreen(
             val pageVideo = videos.getOrNull(page)
             val isCurrentPage = page == pagerState.currentPage
             val pageRotation = if (isCurrentPage && pageVideo != null) (rotations[pageVideo.uri] ?: 0f) else 0f
-            BoxWithConstraints(
+            Box(
                 Modifier.fillMaxSize().background(Color.Black),
                 contentAlignment = Alignment.Center
             ) {
                 if (isCurrentPage) {
-                    val wPx = maxWidth.value.coerceAtLeast(1f)
-                    val hPx = maxHeight.value.coerceAtLeast(1f)
-                    val isSideways = ((pageRotation.toInt() % 360 + 360) % 360) in listOf(90, 270)
-                    val fitScale = if (isSideways) {
-                        minOf(wPx / hPx, hPx / wPx)
-                    } else {
-                        1f
-                    }
                     AndroidView(
                         modifier = Modifier
                             .fillMaxSize()
-                            .graphicsLayer {
-                                rotationZ = pageRotation
-                                scaleX = fitScale
-                                scaleY = fitScale
-                            },
+                            .graphicsLayer { rotationZ = pageRotation },
                         factory = { ctx ->
                             PlayerView(ctx).apply {
                                 this.player = player
