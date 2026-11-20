@@ -827,14 +827,18 @@ private fun VideoPlayerScreen(
             val pageVideo = videos.getOrNull(page)
             val isCurrentPage = page == pagerState.currentPage
             val pageRotation = if (isCurrentPage && pageVideo != null) (rotations[pageVideo.uri] ?: 0f) else 0f
-            Box(
+            BoxWithConstraints(
                 Modifier.fillMaxSize().background(Color.Black),
                 contentAlignment = Alignment.Center
             ) {
                 if (isCurrentPage) {
+                    val isSideways = ((pageRotation.toInt() % 360 + 360) % 360) in listOf(90, 270)
+                    val playerWidth = if (isSideways) maxHeight else maxWidth
+                    val playerHeight = if (isSideways) maxWidth else maxHeight
                     AndroidView(
                         modifier = Modifier
-                            .fillMaxSize()
+                            .width(playerWidth)
+                            .height(playerHeight)
                             .graphicsLayer { rotationZ = pageRotation },
                         factory = { ctx ->
                             PlayerView(ctx).apply {
