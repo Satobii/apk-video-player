@@ -13,6 +13,7 @@ import android.provider.MediaStore
 import android.provider.Settings
 import android.util.LruCache
 import android.util.Size
+import android.view.TextureView
 import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
@@ -72,6 +73,7 @@ import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
@@ -79,6 +81,7 @@ import androidx.media3.common.C
 import androidx.media3.common.MediaItem
 import androidx.media3.common.PlaybackException
 import androidx.media3.common.Player
+import androidx.media3.common.VideoSize
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.ui.AspectRatioFrameLayout
 import androidx.media3.ui.PlayerView
@@ -713,6 +716,7 @@ private fun VideoPlayerScreen(
     var touchTick by remember { mutableIntStateOf(0) }
     val rotations = remember { mutableStateMapOf<Uri, Float>() }
     val activeRotation = activeVideo?.let { rotations[it.uri] ?: 0f } ?: 0f
+    var videoSize by remember { mutableStateOf(player.videoSize) }
 
     LaunchedEffect(videos) {
         if (videos.isEmpty()) return@LaunchedEffect
@@ -734,6 +738,10 @@ private fun VideoPlayerScreen(
         val listener = object : Player.Listener {
             override fun onIsPlayingChanged(playing: Boolean) {
                 isPlaying = playing
+            }
+
+            override fun onVideoSizeChanged(size: VideoSize) {
+                videoSize = size
             }
 
             override fun onMediaItemTransition(mediaItem: MediaItem?, reason: Int) {
@@ -832,28 +840,41 @@ private fun VideoPlayerScreen(
                 contentAlignment = Alignment.Center
             ) {
                 if (isCurrentPage) {
-                    val isSideways = ((pageRotation.toInt() % 360 + 360) % 360) in listOf(90, 270)
-                    val playerWidth = if (isSideways) maxHeight else maxWidth
-                    val playerHeight = if (isSideways) maxWidth else maxHeight
+                    val rotDeg = ((pageRotation.toInt() % 360) + 360) % 360
+                    val isSideways = rotDeg == 90 || rotDeg == 270
+
+                    // Aspect ratio video (ikut saiz sebenar video)
+                    val vsRotated = videoSize.unappliedRotationDegrees % 180 != 0
+                    val vw = (if (vsRotated) videoSize.height else videoSize.width).toFloat()
+                    val vh = (if (vsRotated) videoSize.width else videoSize.height).toFloat()
+                    val aspect = if (vw > 0f && vh > 0f) (vw * videoSize.pixelWidthHeightRatio) / vh else 0f
+
+                    // Kalau rotate 90/270, ruang yang ada ditukar (lebar <-> tinggi)
+                    val availW = if (isSideways) maxHeight else maxWidth
+                    val availH = if (isSideways) maxWidth else maxHeight
+                    val boxW: Dp
+                    val boxH: Dp
+                    if (aspect > 0f) {
+                        if (availW.value / availH.value > aspect) {
+                            boxH = availH
+                            boxW = availH * aspect
+                        } else {
+                            boxW = availW
+                            boxH = availW / aspect
+                        }
+                    } else {
+                        boxW = availW
+                        boxH = availH
+                    }
+
                     AndroidView(
                         modifier = Modifier
-                            .width(playerWidth)
-                            .height(playerHeight)
+                            .size(boxW, boxH)
                             .graphicsLayer { rotationZ = pageRotation },
                         factory = { ctx ->
-                            PlayerView(ctx).apply {
-                                this.player = player
-                                useController = false
-                                resizeMode = AspectRatioFrameLayout.RESIZE_MODE_FIT
-                                setShowBuffering(PlayerView.SHOW_BUFFERING_ALWAYS)
-                                setShutterBackgroundColor(android.graphics.Color.BLACK)
-                            }
+                            TextureView(ctx).also { tv -> player.setVideoTextureView(tv) }
                         },
-                        update = { view ->
-                            if (view.player !== player) {
-                                view.player = player
-                            }
-                        }
+                        onRelease = { tv -> player.clearVideoTextureView(tv) }
                     )
                 }
             }
