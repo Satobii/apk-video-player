@@ -869,7 +869,7 @@ private fun VideoPlayerScreen(
 
                     AndroidView(
                         modifier = Modifier
-                            .size(boxW, boxH)
+                            .requiredSize(boxW, boxH)
                             .graphicsLayer { rotationZ = pageRotation },
                         factory = { ctx ->
                             TextureView(ctx).also { tv -> player.setVideoTextureView(tv) }
