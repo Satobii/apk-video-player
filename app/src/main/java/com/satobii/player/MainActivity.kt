@@ -61,6 +61,8 @@ import androidx.compose.foundation.lazy.grid.itemsIndexed as gridItemsIndexed
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.pager.HorizontalPager
+import androidx.compose.foundation.pager.PagerScope
+import androidx.compose.foundation.pager.PagerState
 import androidx.compose.foundation.pager.VerticalPager
 import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.foundation.shape.CircleShape
@@ -98,6 +100,7 @@ import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.input.pointer.positionChanged
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
@@ -135,6 +138,7 @@ private const val KEY_ALBUM_GRID = "album_grid_mode"
 private const val KEY_GROUPS = "album_groups"
 private const val KEY_PLAYBACK_MODE = "playback_mode"
 private const val KEY_MEDIA_FILTER = "media_filter"
+private const val KEY_SLIDE_MODE = "slide_mode"
 
 private object ThumbnailCache {
     private val maxCacheKb = ((Runtime.getRuntime().maxMemory() / 1024L) / 5L).toInt().coerceAtLeast(8192)
@@ -165,6 +169,9 @@ data class AlbumEntry(
 )
 
 enum class MediaFilter { ALL, VIDEOS, PHOTOS }
+
+/** Arah slide untuk video DAN gambar. */
+enum class SlideMode { VERTICAL, HORIZONTAL }
 
 /** Folder buatan user: kumpulan album. Video/gambar tak bercampur, album je yang dikumpul. */
 data class AlbumGroup(val id: Long, val name: String, val albumIds: List<Long>)
@@ -250,6 +257,19 @@ private fun savePlaybackMode(context: Context, mode: PlaybackMode) {
     context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
         .edit()
         .putString(KEY_PLAYBACK_MODE, mode.name)
+        .apply()
+}
+
+private fun loadSavedSlideMode(context: Context): SlideMode {
+    val saved = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        .getString(KEY_SLIDE_MODE, SlideMode.VERTICAL.name)
+    return SlideMode.entries.firstOrNull { it.name == saved } ?: SlideMode.VERTICAL
+}
+
+private fun saveSlideMode(context: Context, mode: SlideMode) {
+    context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        .edit()
+        .putString(KEY_SLIDE_MODE, mode.name)
         .apply()
 }
 
@@ -359,6 +379,7 @@ private fun AstraApp() {
     var photoStart by remember { mutableIntStateOf(0) }
     var mediaFilter by remember { mutableStateOf(loadSavedMediaFilter(context)) }
     var gridMode by remember { mutableStateOf(loadSavedGridMode(context)) }
+    var slideMode by remember { mutableStateOf(loadSavedSlideMode(context)) }
     val gridState = rememberLazyGridState()
     val listState = rememberLazyListState()
     var albumGridMode by remember { mutableStateOf(loadSavedAlbumGrid(context)) }
@@ -377,6 +398,11 @@ private fun AstraApp() {
     val updatePerfMode: (PerformanceMode) -> Unit = { mode ->
         perfMode = mode
         savePerfMode(context, mode)
+    }
+
+    val updateSlideMode: (SlideMode) -> Unit = { mode ->
+        slideMode = mode
+        saveSlideMode(context, mode)
     }
 
     val updateGroups: (List<AlbumGroup>) -> Unit = { newGroups ->
@@ -559,6 +585,8 @@ private fun AstraApp() {
                                 saveAlbumGrid(context, albumGridMode)
                             },
                             onSelectPerfMode = updatePerfMode,
+                            slideMode = slideMode,
+                            onSelectSlideMode = updateSlideMode,
                             onRefresh = { refreshToken++ },
                             onNewFolder = { editor = FolderEditorRequest(null) },
                             onEditFolder = {},
@@ -594,6 +622,8 @@ private fun AstraApp() {
                                 saveAlbumGrid(context, albumGridMode)
                             },
                             onSelectPerfMode = updatePerfMode,
+                            slideMode = slideMode,
+                            onSelectSlideMode = updateSlideMode,
                             onRefresh = {},
                             onNewFolder = {},
                             onEditFolder = { editor = FolderEditorRequest(selectedGroupId) },
@@ -651,6 +681,7 @@ private fun AstraApp() {
                         "photo" -> PhotoViewerScreen(
                             photos = activePhotos,
                             initialIndex = photoStart,
+                            slideMode = slideMode,
                             onBack = { screen = "videos" }
                         )
 
@@ -664,6 +695,8 @@ private fun AstraApp() {
                                 playbackMode = if (playbackMode == PlaybackMode.REPEAT) PlaybackMode.AUTO_NEXT else PlaybackMode.REPEAT
                                 savePlaybackMode(context, playbackMode)
                             },
+                            slideMode = slideMode,
+                            onSlideModeChange = updateSlideMode,
                             onBack = leavePlayerToPlaylist
                         )
                     }
@@ -1025,6 +1058,8 @@ private fun AlbumScreen(
     onBack: () -> Unit,
     onToggleGrid: () -> Unit,
     onSelectPerfMode: (PerformanceMode) -> Unit,
+    slideMode: SlideMode,
+    onSelectSlideMode: (SlideMode) -> Unit,
     onRefresh: () -> Unit,
     onNewFolder: () -> Unit,
     onEditFolder: () -> Unit,
@@ -1084,6 +1119,30 @@ private fun AlbumScreen(
                                 },
                                 onClick = {
                                     onSelectPerfMode(mode)
+                                    settingsMenuOpen = false
+                                }
+                            )
+                        }
+                        Text(
+                            "Slide direction (video & photo)",
+                            color = TextMuted,
+                            fontSize = 12.sp,
+                            fontWeight = FontWeight.Bold,
+                            modifier = Modifier.padding(start = 16.dp, end = 16.dp, top = 12.dp, bottom = 6.dp)
+                        )
+                        listOf(
+                            SlideMode.VERTICAL to "Ke bawah / atas",
+                            SlideMode.HORIZONTAL to "Ketepi (kiri / kanan)"
+                        ).forEach { (mode, label) ->
+                            DropdownMenuItem(
+                                text = { Text(label, color = TextMain, fontSize = 14.sp) },
+                                trailingIcon = {
+                                    if (slideMode == mode) {
+                                        Icon(Icons.Default.Check, contentDescription = null, tint = TextMain)
+                                    }
+                                },
+                                onClick = {
+                                    onSelectSlideMode(mode)
                                     settingsMenuOpen = false
                                 }
                             )
@@ -1478,6 +1537,106 @@ private fun AlbumContentScreen(
     }
 }
 
+private fun fitSize(maxW: Dp, maxH: Dp, aspect: Float, sideways: Boolean): Pair<Dp, Dp> {
+    // Kalau rotate 90/270, ruang yang ada ditukar (lebar <-> tinggi)
+    val availW = if (sideways) maxH else maxW
+    val availH = if (sideways) maxW else maxH
+    if (aspect <= 0f) return availW to availH
+    return if (availW.value / availH.value > aspect) {
+        (availH * aspect) to availH
+    } else {
+        availW to (availW / aspect)
+    }
+}
+
+private fun loadPreviewBitmap(context: Context, uri: Uri, isVideo: Boolean): Bitmap? {
+    return try {
+        if (Build.VERSION.SDK_INT >= 29) {
+            context.contentResolver.loadThumbnail(uri, Size(720, 1280), null)
+        } else {
+            @Suppress("DEPRECATION")
+            if (isVideo) {
+                MediaStore.Video.Thumbnails.getThumbnail(
+                    context.contentResolver, ContentUris.parseId(uri), MediaStore.Video.Thumbnails.MINI_KIND, null
+                )
+            } else {
+                MediaStore.Images.Thumbnails.getThumbnail(
+                    context.contentResolver, ContentUris.parseId(uri), MediaStore.Images.Thumbnails.MINI_KIND, null
+                )
+            }
+        }
+    } catch (_: Throwable) {
+        null
+    }
+}
+
+/** Gambar pratonton (thumbnail besar) supaya page seterusnya tak kosong / hitam masa slide. */
+@Composable
+private fun rememberPreviewBitmap(uri: Uri, isVideo: Boolean): Bitmap? {
+    val context = LocalContext.current
+    val key = remember(uri) { "${uri}_preview" }
+    var bmp by remember(key) { mutableStateOf(ThumbnailCache.cache.get(key)) }
+    LaunchedEffect(key) {
+        if (bmp == null) {
+            val loaded = withContext(Dispatchers.IO) { loadPreviewBitmap(context, uri, isVideo) }
+            if (loaded != null) {
+                ThumbnailCache.cache.put(key, loaded)
+                bmp = loaded
+            }
+        }
+    }
+    return bmp
+}
+
+@Composable
+private fun PagePreview(uri: Uri, isVideo: Boolean, rotation: Float, maxW: Dp, maxH: Dp) {
+    val bmp = rememberPreviewBitmap(uri, isVideo)
+    if (bmp != null) {
+        val rotDeg = ((rotation.toInt() % 360) + 360) % 360
+        val aspect = bmp.width.toFloat() / bmp.height.toFloat()
+        val (w, h) = fitSize(maxW, maxH, aspect, rotDeg == 90 || rotDeg == 270)
+        val imageBitmap = remember(bmp) { bmp.asImageBitmap() }
+        Image(
+            bitmap = imageBitmap,
+            contentDescription = null,
+            contentScale = ContentScale.Fit,
+            modifier = Modifier.requiredSize(w, h).graphicsLayer { rotationZ = rotation }
+        )
+    }
+}
+
+/** Pager yang boleh tukar arah: vertical (ke bawah/atas) atau horizontal (ketepi). */
+@Composable
+private fun SlidePager(
+    state: PagerState,
+    vertical: Boolean,
+    modifier: Modifier = Modifier,
+    userScrollEnabled: Boolean = true,
+    pageSpacing: Dp = 0.dp,
+    beyondViewportPageCount: Int = 0,
+    pageContent: @Composable PagerScope.(Int) -> Unit
+) {
+    if (vertical) {
+        VerticalPager(
+            state = state,
+            modifier = modifier,
+            userScrollEnabled = userScrollEnabled,
+            pageSpacing = pageSpacing,
+            beyondViewportPageCount = beyondViewportPageCount,
+            pageContent = pageContent
+        )
+    } else {
+        HorizontalPager(
+            state = state,
+            modifier = modifier,
+            userScrollEnabled = userScrollEnabled,
+            pageSpacing = pageSpacing,
+            beyondViewportPageCount = beyondViewportPageCount,
+            pageContent = pageContent
+        )
+    }
+}
+
 private fun clampOffset(offset: Offset, scale: Float, width: Float, height: Float): Offset {
     val maxX = (width * (scale - 1f)) / 2f
     val maxY = (height * (scale - 1f)) / 2f
@@ -1541,8 +1700,9 @@ private fun ZoomablePhoto(
 ) {
     val context = LocalContext.current
     val bitmap by produceState<Bitmap?>(initialValue = null, uri) {
-        value = withContext(Dispatchers.IO) { decodePhoto(context, uri, 2400) }
+        value = withContext(Dispatchers.IO) { decodePhoto(context, uri, 2048) }
     }
+    val preview = rememberPreviewBitmap(uri, false)
     var scale by remember(uri) { mutableFloatStateOf(1f) }
     var offset by remember(uri) { mutableStateOf(Offset.Zero) }
 
@@ -1602,7 +1762,7 @@ private fun ZoomablePhoto(
             },
         contentAlignment = Alignment.Center
     ) {
-        val bmp = bitmap
+        val bmp = bitmap ?: preview
         if (bmp != null) {
             Image(
                 bitmap = bmp.asImageBitmap(),
@@ -1627,6 +1787,7 @@ private fun ZoomablePhoto(
 private fun PhotoViewerScreen(
     photos: List<VideoEntry>,
     initialIndex: Int,
+    slideMode: SlideMode,
     onBack: () -> Unit
 ) {
     val safeInitial = initialIndex.coerceIn(0, (photos.size - 1).coerceAtLeast(0))
@@ -1638,10 +1799,12 @@ private fun PhotoViewerScreen(
     LaunchedEffect(pagerState.currentPage) { zoomed = false }
 
     Box(Modifier.fillMaxSize().background(Color.Black)) {
-        HorizontalPager(
+        SlidePager(
             state = pagerState,
+            vertical = slideMode == SlideMode.VERTICAL,
             userScrollEnabled = !zoomed,
             pageSpacing = 12.dp,
+            beyondViewportPageCount = 1,
             modifier = Modifier.fillMaxSize()
         ) { page ->
             val photo = photos.getOrNull(page)
@@ -1703,8 +1866,11 @@ private fun VideoPlayerScreen(
     playbackMode: PlaybackMode,
     perfMode: PerformanceMode,
     onModeChange: () -> Unit,
+    slideMode: SlideMode,
+    onSlideModeChange: (SlideMode) -> Unit,
     onBack: () -> Unit
 ) {
+    val vertical = slideMode == SlideMode.VERTICAL
     val safeInitial = initialIndex.coerceIn(0, (videos.size - 1).coerceAtLeast(0))
     val pagerState = rememberPagerState(initialPage = safeInitial) { videos.size }
     val coroutineScope = rememberCoroutineScope()
@@ -1719,6 +1885,8 @@ private fun VideoPlayerScreen(
     val rotations = remember { mutableStateMapOf<Uri, Float>() }
     val activeRotation = activeVideo?.let { rotations[it.uri] ?: 0f } ?: 0f
     var videoSize by remember { mutableStateOf(player.videoSize) }
+    // index video yang frame pertamanya dah dirender (supaya tak nampak frame lama / hitam masa slide)
+    var readyIndex by remember { mutableIntStateOf(-1) }
 
     LaunchedEffect(videos) {
         if (videos.isEmpty()) return@LaunchedEffect
@@ -1727,6 +1895,8 @@ private fun VideoPlayerScreen(
         if (!alreadyLoadedSameQueue) {
             player.setMediaItems(videos.map { MediaItem.fromUri(it.uri) }, safeInitial, 0L)
             player.prepare()
+        } else if (player.currentMediaItemIndex == safeInitial && player.playbackState == Player.STATE_READY) {
+            readyIndex = safeInitial
         }
         player.playWhenReady = true
         player.play()
@@ -1744,6 +1914,10 @@ private fun VideoPlayerScreen(
 
             override fun onVideoSizeChanged(size: VideoSize) {
                 videoSize = size
+            }
+
+            override fun onRenderedFirstFrame() {
+                readyIndex = player.currentMediaItemIndex
             }
 
             override fun onMediaItemTransition(mediaItem: MediaItem?, reason: Int) {
@@ -1785,22 +1959,37 @@ private fun VideoPlayerScreen(
         onDispose { player.removeListener(listener) }
     }
 
-    LaunchedEffect(pagerState.currentPage, activeVideo?.uri) {
+    LaunchedEffect(pagerState.currentPage) {
         controlsVisible = false
         settingsOpen = false
-        val targetPage = pagerState.currentPage
-        val targetVideo = videos.getOrNull(targetPage)
+    }
+
+    // Tukar video HANYA bila slide dah settle, supaya video lama tak "lompat" tengah-tengah slide.
+    val settledPage = pagerState.settledPage
+    LaunchedEffect(settledPage, videos) {
+        val targetVideo = videos.getOrNull(settledPage)
         currentPos = 0L
         duration = targetVideo?.duration?.coerceAtLeast(0L) ?: 0L
         if (targetVideo != null && player.mediaItemCount == videos.size) {
-            if (player.currentMediaItemIndex != targetPage) {
-                player.seekTo(targetPage, 0L)
+            if (player.currentMediaItemIndex != settledPage) {
+                player.seekTo(settledPage, 0L)
             }
             if (player.playbackState == Player.STATE_IDLE) {
                 player.prepare()
             }
             player.playWhenReady = true
             player.play()
+        }
+    }
+
+    // Jaga-jaga kalau event frame pertama tak sampai
+    LaunchedEffect(settledPage) {
+        delay(1200)
+        if (readyIndex != settledPage &&
+            player.currentMediaItemIndex == settledPage &&
+            player.playbackState == Player.STATE_READY
+        ) {
+            readyIndex = settledPage
         }
     }
 
@@ -1833,50 +2022,58 @@ private fun VideoPlayerScreen(
                 )
             }
     ) {
-        VerticalPager(state = pagerState, modifier = Modifier.fillMaxSize()) { page ->
+        // Lapisan video sebenar (di bawah pager). Ia ikut gerakan pager supaya nampak macam slide.
+        val liveVideo = videos.getOrNull(settledPage)
+        if (liveVideo != null) {
+            BoxWithConstraints(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                val liveRotation = rotations[liveVideo.uri] ?: 0f
+                val rotDeg = ((liveRotation.toInt() % 360) + 360) % 360
+                val vsRotated = videoSize.unappliedRotationDegrees % 180 != 0
+                val vw = (if (vsRotated) videoSize.height else videoSize.width).toFloat()
+                val vh = (if (vsRotated) videoSize.width else videoSize.height).toFloat()
+                val aspect = if (vw > 0f && vh > 0f) (vw * videoSize.pixelWidthHeightRatio) / vh else 0f
+                val (boxW, boxH) = fitSize(maxWidth, maxHeight, aspect, rotDeg == 90 || rotDeg == 270)
+                val pagePx = with(LocalDensity.current) { (if (vertical) maxHeight else maxWidth).toPx() }
+
+                AndroidView(
+                    modifier = Modifier
+                        .requiredSize(boxW, boxH)
+                        .graphicsLayer {
+                            rotationZ = liveRotation
+                            val shift = -((pagerState.currentPage - pagerState.settledPage) +
+                                pagerState.currentPageOffsetFraction) * pagePx
+                            if (vertical) translationY = shift else translationX = shift
+                            alpha = if (readyIndex == pagerState.settledPage) 1f else 0f
+                        },
+                    factory = { ctx ->
+                        TextureView(ctx).also { tv -> player.setVideoTextureView(tv) }
+                    },
+                    onRelease = { tv -> player.clearVideoTextureView(tv) }
+                )
+            }
+        }
+
+        // Pager di atas: page yang tengah main transparent (nampak video di bawah),
+        // page lain tunjuk thumbnail (tak hitam kosong).
+        SlidePager(
+            state = pagerState,
+            vertical = vertical,
+            beyondViewportPageCount = 1,
+            modifier = Modifier.fillMaxSize()
+        ) { page ->
             val pageVideo = videos.getOrNull(page)
-            val isCurrentPage = page == pagerState.currentPage
-            val pageRotation = if (isCurrentPage && pageVideo != null) (rotations[pageVideo.uri] ?: 0f) else 0f
+            val liveHere = page == pagerState.settledPage && readyIndex == page
             BoxWithConstraints(
-                Modifier.fillMaxSize().background(Color.Black),
+                Modifier.fillMaxSize().then(if (liveHere) Modifier else Modifier.background(Color.Black)),
                 contentAlignment = Alignment.Center
             ) {
-                if (isCurrentPage) {
-                    val rotDeg = ((pageRotation.toInt() % 360) + 360) % 360
-                    val isSideways = rotDeg == 90 || rotDeg == 270
-
-                    // Aspect ratio video (ikut saiz sebenar video)
-                    val vsRotated = videoSize.unappliedRotationDegrees % 180 != 0
-                    val vw = (if (vsRotated) videoSize.height else videoSize.width).toFloat()
-                    val vh = (if (vsRotated) videoSize.width else videoSize.height).toFloat()
-                    val aspect = if (vw > 0f && vh > 0f) (vw * videoSize.pixelWidthHeightRatio) / vh else 0f
-
-                    // Kalau rotate 90/270, ruang yang ada ditukar (lebar <-> tinggi)
-                    val availW = if (isSideways) maxHeight else maxWidth
-                    val availH = if (isSideways) maxWidth else maxHeight
-                    val boxW: Dp
-                    val boxH: Dp
-                    if (aspect > 0f) {
-                        if (availW.value / availH.value > aspect) {
-                            boxH = availH
-                            boxW = availH * aspect
-                        } else {
-                            boxW = availW
-                            boxH = availW / aspect
-                        }
-                    } else {
-                        boxW = availW
-                        boxH = availH
-                    }
-
-                    AndroidView(
-                        modifier = Modifier
-                            .requiredSize(boxW, boxH)
-                            .graphicsLayer { rotationZ = pageRotation },
-                        factory = { ctx ->
-                            TextureView(ctx).also { tv -> player.setVideoTextureView(tv) }
-                        },
-                        onRelease = { tv -> player.clearVideoTextureView(tv) }
+                if (pageVideo != null && !liveHere) {
+                    PagePreview(
+                        uri = pageVideo.uri,
+                        isVideo = true,
+                        rotation = rotations[pageVideo.uri] ?: 0f,
+                        maxW = maxWidth,
+                        maxH = maxHeight
                     )
                 }
             }
@@ -1922,6 +2119,20 @@ private fun VideoPlayerScreen(
                                     checked = playbackMode == PlaybackMode.AUTO_NEXT,
                                     onCheckedChange = {
                                         onModeChange()
+                                        settingsOpen = false
+                                    }
+                                )
+                            }
+                            Row(
+                                Modifier.padding(horizontal = 16.dp, vertical = 10.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(16.dp)
+                            ) {
+                                Text("Slide ketepi", color = TextMain)
+                                Switch(
+                                    checked = slideMode == SlideMode.HORIZONTAL,
+                                    onCheckedChange = { sideways ->
+                                        onSlideModeChange(if (sideways) SlideMode.HORIZONTAL else SlideMode.VERTICAL)
                                         settingsOpen = false
                                     }
                                 )
