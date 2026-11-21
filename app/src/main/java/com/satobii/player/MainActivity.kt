@@ -1067,6 +1067,23 @@ private fun AlbumScreen(
     onLongPress: (AlbumTileData) -> Unit
 ) {
     var settingsMenuOpen by remember { mutableStateOf(false) }
+    var updateOpen by remember { mutableStateOf(false) }
+    val appContext = LocalContext.current
+    val installedVersion = remember { currentVersionName(appContext) }
+
+    LaunchedEffect(isHome) {
+        if (isHome && !UpdateSession.autoChecked) {
+            UpdateSession.autoChecked = true
+            val found = try {
+                fetchLatestRelease()?.takeIf { isNewerVersion(it.versionName, installedVersion) }
+            } catch (_: Exception) {
+                null
+            }
+            if (found != null) updateOpen = true
+        }
+    }
+
+    if (updateOpen) UpdateDialog(onDismiss = { updateOpen = false })
 
     Column(Modifier.fillMaxSize().statusBarsPadding().padding(horizontal = 18.dp)) {
         Spacer(Modifier.height(18.dp))
@@ -1147,6 +1164,14 @@ private fun AlbumScreen(
                                 }
                             )
                         }
+                        HorizontalDivider(modifier = Modifier.padding(vertical = 6.dp))
+                        DropdownMenuItem(
+                            text = { Text("App updates (v$installedVersion)", color = TextMain, fontSize = 14.sp) },
+                            onClick = {
+                                settingsMenuOpen = false
+                                updateOpen = true
+                            }
+                        )
                     }
                 }
             }
