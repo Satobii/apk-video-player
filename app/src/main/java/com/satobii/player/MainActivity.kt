@@ -37,10 +37,12 @@ import androidx.compose.animation.slideInVertically
 import androidx.compose.animation.slideOutHorizontally
 import androidx.compose.animation.slideOutVertically
 import androidx.compose.animation.togetherWith
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.gestures.calculatePan
@@ -54,6 +56,7 @@ import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyGridState
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.rememberLazyGridState
+import androidx.compose.foundation.lazy.grid.items as gridItems
 import androidx.compose.foundation.lazy.grid.itemsIndexed as gridItemsIndexed
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.itemsIndexed
@@ -66,6 +69,8 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ArrowBack
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.CreateNewFolder
+import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.Folder
 import androidx.compose.material.icons.filled.Forward5
 import androidx.compose.material.icons.filled.GridView
@@ -73,6 +78,7 @@ import androidx.compose.material.icons.filled.Image as ImageIcon
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material.icons.filled.PlayArrow
+import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Replay5
 import androidx.compose.material.icons.filled.RotateRight
 import androidx.compose.material.icons.filled.Settings
@@ -87,6 +93,7 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.input.pointer.positionChanged
 import androidx.compose.ui.layout.ContentScale
@@ -109,6 +116,8 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import org.json.JSONArray
+import org.json.JSONObject
 import java.util.Locale
 
 private val Bg = Color(0xFF101010)
@@ -122,6 +131,10 @@ private const val KEY_PERF_MODE = "perf_mode"
 private const val KEY_SORT_MODE = "sort_mode"
 private const val KEY_SORT_ASC = "sort_asc"
 private const val KEY_GRID_MODE = "grid_mode"
+private const val KEY_ALBUM_GRID = "album_grid_mode"
+private const val KEY_GROUPS = "album_groups"
+private const val KEY_PLAYBACK_MODE = "playback_mode"
+private const val KEY_MEDIA_FILTER = "media_filter"
 
 private object ThumbnailCache {
     private val maxCacheKb = ((Runtime.getRuntime().maxMemory() / 1024L) / 5L).toInt().coerceAtLeast(8192)
@@ -152,6 +165,36 @@ data class AlbumEntry(
 )
 
 enum class MediaFilter { ALL, VIDEOS, PHOTOS }
+
+/** Folder buatan user: kumpulan album. Video/gambar tak bercampur, album je yang dikumpul. */
+data class AlbumGroup(val id: Long, val name: String, val albumIds: List<Long>)
+
+/** Data satu tile di skrin album (boleh jadi album biasa atau folder). */
+data class AlbumTileData(
+    val key: String,
+    val title: String,
+    val subtitle: String,
+    val cover: Uri?,
+    val coverIsVideo: Boolean,
+    val albumId: Long?,
+    val groupId: Long?
+)
+
+data class FolderEditorRequest(val groupId: Long?, val preselect: Set<Long> = emptySet())
+
+private fun albumSubtitle(album: AlbumEntry): String {
+    return buildList {
+        if (album.videoCount > 0) add("${album.videoCount} videos")
+        if (album.photoCount > 0) add("${album.photoCount} photos")
+    }.joinToString(" · ")
+}
+
+private fun screenRank(screen: String): Int = when (screen) {
+    "albums" -> 0
+    "group" -> 1
+    "videos" -> 2
+    else -> 3
+}
 
 enum class SortMode { NAME, DATE, SIZE }
 enum class PlaybackMode { REPEAT, AUTO_NEXT }
@@ -197,6 +240,79 @@ private fun saveGridMode(context: Context, grid: Boolean) {
         .apply()
 }
 
+private fun loadSavedPlaybackMode(context: Context): PlaybackMode {
+    val saved = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        .getString(KEY_PLAYBACK_MODE, PlaybackMode.REPEAT.name)
+    return PlaybackMode.entries.firstOrNull { it.name == saved } ?: PlaybackMode.REPEAT
+}
+
+private fun savePlaybackMode(context: Context, mode: PlaybackMode) {
+    context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        .edit()
+        .putString(KEY_PLAYBACK_MODE, mode.name)
+        .apply()
+}
+
+private fun loadSavedMediaFilter(context: Context): MediaFilter {
+    val saved = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        .getString(KEY_MEDIA_FILTER, MediaFilter.ALL.name)
+    return MediaFilter.entries.firstOrNull { it.name == saved } ?: MediaFilter.ALL
+}
+
+private fun saveMediaFilter(context: Context, filter: MediaFilter) {
+    context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        .edit()
+        .putString(KEY_MEDIA_FILTER, filter.name)
+        .apply()
+}
+
+private fun loadSavedAlbumGrid(context: Context): Boolean {
+    return context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        .getBoolean(KEY_ALBUM_GRID, true)
+}
+
+private fun saveAlbumGrid(context: Context, grid: Boolean) {
+    context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        .edit()
+        .putBoolean(KEY_ALBUM_GRID, grid)
+        .apply()
+}
+
+private fun loadGroups(context: Context): List<AlbumGroup> {
+    val raw = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        .getString(KEY_GROUPS, null) ?: return emptyList()
+    return try {
+        val arr = JSONArray(raw)
+        (0 until arr.length()).map { i ->
+            val o = arr.getJSONObject(i)
+            val ids = o.getJSONArray("albums")
+            AlbumGroup(
+                id = o.getLong("id"),
+                name = o.getString("name"),
+                albumIds = (0 until ids.length()).map { ids.getLong(it) }
+            )
+        }
+    } catch (_: Exception) {
+        emptyList()
+    }
+}
+
+private fun saveGroups(context: Context, groups: List<AlbumGroup>) {
+    val arr = JSONArray()
+    groups.forEach { g ->
+        arr.put(
+            JSONObject()
+                .put("id", g.id)
+                .put("name", g.name)
+                .put("albums", JSONArray(g.albumIds))
+        )
+    }
+    context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        .edit()
+        .putString(KEY_GROUPS, arr.toString())
+        .apply()
+}
+
 private fun mediaPermissions(): Array<String> =
     if (Build.VERSION.SDK_INT >= 33) {
         arrayOf(Manifest.permission.READ_MEDIA_VIDEO, Manifest.permission.READ_MEDIA_IMAGES)
@@ -235,22 +351,37 @@ private fun AstraApp() {
     var screen by remember { mutableStateOf("albums") }
     var sortMode by remember { mutableStateOf(loadSavedSortMode(context)) }
     var ascending by remember { mutableStateOf(loadSavedSortAsc(context)) }
-    var playbackMode by remember { mutableStateOf(PlaybackMode.REPEAT) }
+    var playbackMode by remember { mutableStateOf(loadSavedPlaybackMode(context)) }
     var perfMode by remember { mutableStateOf(loadSavedPerfMode(context)) }
     var activeVideos by remember { mutableStateOf<List<VideoEntry>>(emptyList()) }
     var startAt by remember { mutableIntStateOf(0) }
     var activePhotos by remember { mutableStateOf<List<VideoEntry>>(emptyList()) }
     var photoStart by remember { mutableIntStateOf(0) }
-    var mediaFilter by remember { mutableStateOf(MediaFilter.ALL) }
+    var mediaFilter by remember { mutableStateOf(loadSavedMediaFilter(context)) }
     var gridMode by remember { mutableStateOf(loadSavedGridMode(context)) }
     val gridState = rememberLazyGridState()
     val listState = rememberLazyListState()
+    var albumGridMode by remember { mutableStateOf(loadSavedAlbumGrid(context)) }
+    val homeGridState = rememberLazyGridState()
+    val homeListState = rememberLazyListState()
+    val groupGridState = rememberLazyGridState()
+    val groupListState = rememberLazyListState()
+    var groups by remember { mutableStateOf(loadGroups(context)) }
+    var selectedGroupId by remember { mutableStateOf<Long?>(null) }
+    var openedFromGroup by remember { mutableStateOf(false) }
+    var editor by remember { mutableStateOf<FolderEditorRequest?>(null) }
+    var tileMenu by remember { mutableStateOf<AlbumTileData?>(null) }
     var miniPlayerActive by remember { mutableStateOf(false) }
     var refreshToken by remember { mutableIntStateOf(0) }
 
     val updatePerfMode: (PerformanceMode) -> Unit = { mode ->
         perfMode = mode
         savePerfMode(context, mode)
+    }
+
+    val updateGroups: (List<AlbumGroup>) -> Unit = { newGroups ->
+        groups = newGroups
+        saveGroups(context, newGroups)
     }
 
     val updateSort: (SortMode) -> Unit = { mode ->
@@ -330,7 +461,57 @@ private fun AstraApp() {
     }
 
     BackHandler(enabled = hasPermission && screen == "videos") {
+        screen = if (openedFromGroup && selectedGroupId != null) "group" else "albums"
+    }
+
+    BackHandler(enabled = hasPermission && screen == "group") {
         screen = "albums"
+    }
+
+    val groupedAlbumIds = remember(groups) { groups.flatMap { it.albumIds }.toSet() }
+
+    val homeTiles = remember(albums, groups) {
+        val groupTiles = groups.map { g ->
+            val members = g.albumIds.mapNotNull { id -> albums.firstOrNull { it.id == id } }
+            val first = members.firstOrNull()
+            AlbumTileData(
+                key = "g_${g.id}",
+                title = g.name,
+                subtitle = "${members.size} albums · ${members.sumOf { it.count }} items",
+                cover = first?.cover,
+                coverIsVideo = first?.coverIsVideo ?: true,
+                albumId = null,
+                groupId = g.id
+            )
+        }
+        val albumTiles = albums.filter { it.id !in groupedAlbumIds }.map { a ->
+            AlbumTileData(
+                key = "a_${a.id}",
+                title = a.name,
+                subtitle = albumSubtitle(a),
+                cover = a.cover,
+                coverIsVideo = a.coverIsVideo,
+                albumId = a.id,
+                groupId = null
+            )
+        }
+        groupTiles + albumTiles
+    }
+
+    val currentGroup = groups.firstOrNull { it.id == selectedGroupId }
+    val groupTiles = remember(albums, currentGroup) {
+        (currentGroup?.albumIds ?: emptyList()).mapNotNull { id -> albums.firstOrNull { it.id == id } }
+            .map { a ->
+                AlbumTileData(
+                    key = "a_${a.id}",
+                    title = a.name,
+                    subtitle = albumSubtitle(a),
+                    cover = a.cover,
+                    coverIsVideo = a.coverIsVideo,
+                    albumId = a.id,
+                    groupId = null
+                )
+            }
     }
 
     val sortedAlbumMedia by remember(allVideos, selectedAlbum, sortMode, ascending, mediaFilter) {
@@ -364,24 +545,78 @@ private fun AstraApp() {
                 val renderScreenContent: @Composable (String) -> Unit = { currentScreen ->
                     when (currentScreen) {
                         "albums" -> AlbumScreen(
-                            albums = albums,
-                            total = allVideos.size,
+                            title = "ASTRA PLAYER",
+                            subtitle = "${allVideos.size} items · ${albums.size} albums",
+                            tiles = homeTiles,
+                            isHome = true,
                             perfMode = perfMode,
+                            gridMode = albumGridMode,
+                            gridState = homeGridState,
+                            listState = homeListState,
+                            onBack = {},
+                            onToggleGrid = {
+                                albumGridMode = !albumGridMode
+                                saveAlbumGrid(context, albumGridMode)
+                            },
                             onSelectPerfMode = updatePerfMode,
-                            onRefresh = { refreshToken++ }
-                        ) { album ->
-                            selectedAlbum = album.id
-                            mediaFilter = MediaFilter.ALL
-                            gridState.requestScrollToItem(0)
-                            listState.requestScrollToItem(0)
-                            screen = "videos"
-                        }
+                            onRefresh = { refreshToken++ },
+                            onNewFolder = { editor = FolderEditorRequest(null) },
+                            onEditFolder = {},
+                            onOpen = { tile ->
+                                if (tile.groupId != null) {
+                                    selectedGroupId = tile.groupId
+                                    groupGridState.requestScrollToItem(0)
+                                    groupListState.requestScrollToItem(0)
+                                    screen = "group"
+                                } else if (tile.albumId != null) {
+                                    selectedAlbum = tile.albumId
+                                    openedFromGroup = false
+                                    gridState.requestScrollToItem(0)
+                                    listState.requestScrollToItem(0)
+                                    screen = "videos"
+                                }
+                            },
+                            onLongPress = { tile -> tileMenu = tile }
+                        )
+
+                        "group" -> AlbumScreen(
+                            title = currentGroup?.name ?: "Folder",
+                            subtitle = "${groupTiles.size} albums",
+                            tiles = groupTiles,
+                            isHome = false,
+                            perfMode = perfMode,
+                            gridMode = albumGridMode,
+                            gridState = groupGridState,
+                            listState = groupListState,
+                            onBack = { screen = "albums" },
+                            onToggleGrid = {
+                                albumGridMode = !albumGridMode
+                                saveAlbumGrid(context, albumGridMode)
+                            },
+                            onSelectPerfMode = updatePerfMode,
+                            onRefresh = {},
+                            onNewFolder = {},
+                            onEditFolder = { editor = FolderEditorRequest(selectedGroupId) },
+                            onOpen = { tile ->
+                                if (tile.albumId != null) {
+                                    selectedAlbum = tile.albumId
+                                    openedFromGroup = true
+                                    gridState.requestScrollToItem(0)
+                                    listState.requestScrollToItem(0)
+                                    screen = "videos"
+                                }
+                            },
+                            onLongPress = { tile -> tileMenu = tile }
+                        )
 
                         "videos" -> AlbumContentScreen(
                             album = albums.firstOrNull { it.id == selectedAlbum }?.name ?: "Gallery",
                             items = sortedAlbumMedia,
                             filter = mediaFilter,
-                            onFilter = { mediaFilter = it },
+                            onFilter = {
+                                mediaFilter = it
+                                saveMediaFilter(context, it)
+                            },
                             sortMode = sortMode,
                             ascending = ascending,
                             gridMode = gridMode,
@@ -392,7 +627,7 @@ private fun AstraApp() {
                             perfMode = perfMode,
                             gridState = gridState,
                             listState = listState,
-                            onBack = { screen = "albums" },
+                            onBack = { screen = if (openedFromGroup && selectedGroupId != null) "group" else "albums" },
                             onSort = updateSort,
                             onOpen = { index ->
                                 val item = sortedAlbumMedia.getOrNull(index)
@@ -427,6 +662,7 @@ private fun AstraApp() {
                             perfMode = perfMode,
                             onModeChange = {
                                 playbackMode = if (playbackMode == PlaybackMode.REPEAT) PlaybackMode.AUTO_NEXT else PlaybackMode.REPEAT
+                                savePlaybackMode(context, playbackMode)
                             },
                             onBack = leavePlayerToPlaylist
                         )
@@ -437,8 +673,7 @@ private fun AstraApp() {
                     AnimatedContent(
                         targetState = screen,
                         transitionSpec = {
-                            val goingForward = (initialState == "albums" && targetState == "videos") ||
-                                (initialState == "videos" && targetState == "player")
+                            val goingForward = screenRank(targetState) > screenRank(initialState)
                             if (goingForward) {
                                 (fadeIn(tween(180)) + slideInHorizontally(tween(220)) { it / 7 }) togetherWith
                                     (fadeOut(tween(140)) + slideOutHorizontally(tween(180)) { -it / 9 })
@@ -454,6 +689,102 @@ private fun AstraApp() {
                 } else {
                     renderScreenContent(screen)
                 }
+            }
+
+            // ---- Dialog buat / edit folder ----
+            val req = editor
+            if (req != null && hasPermission) {
+                val existing = groups.firstOrNull { it.id == req.groupId }
+                val otherFolderOf = remember(groups, existing?.id) {
+                    val map = mutableMapOf<Long, String>()
+                    groups.filter { it.id != existing?.id }.forEach { g ->
+                        g.albumIds.forEach { id -> map[id] = g.name }
+                    }
+                    map.toMap()
+                }
+                FolderEditorDialog(
+                    title = if (existing == null) "New folder" else "Edit folder",
+                    initialName = existing?.name ?: "",
+                    albums = albums,
+                    initialSelected = existing?.albumIds?.toSet() ?: req.preselect,
+                    otherFolderOf = otherFolderOf,
+                    onDismiss = { editor = null },
+                    onConfirm = { rawName, selectedIds ->
+                        val cleaned = rawName.trim().ifEmpty { "New folder" }
+                        val updated = if (existing == null) {
+                            groups.map { g -> g.copy(albumIds = g.albumIds.filter { it !in selectedIds }) } +
+                                AlbumGroup(System.currentTimeMillis(), cleaned, selectedIds.toList())
+                        } else {
+                            groups.map { g ->
+                                if (g.id == existing.id) g.copy(name = cleaned, albumIds = selectedIds.toList())
+                                else g.copy(albumIds = g.albumIds.filter { it !in selectedIds })
+                            }
+                        }
+                        updateGroups(updated)
+                        editor = null
+                    },
+                    onDelete = if (existing != null) {
+                        {
+                            updateGroups(groups.filter { it.id != existing.id })
+                            editor = null
+                            if (selectedGroupId == existing.id) {
+                                selectedGroupId = null
+                                screen = "albums"
+                            }
+                        }
+                    } else null
+                )
+            }
+
+            // ---- Menu tekan lama pada album / folder ----
+            val menuTile = tileMenu
+            if (menuTile != null && hasPermission) {
+                AlertDialog(
+                    onDismissRequest = { tileMenu = null },
+                    containerColor = SurfaceDark,
+                    title = { Text(menuTile.title, color = TextMain, maxLines = 1, overflow = TextOverflow.Ellipsis) },
+                    text = {
+                        Column {
+                            if (menuTile.groupId != null) {
+                                TextButton(onClick = {
+                                    editor = FolderEditorRequest(menuTile.groupId)
+                                    tileMenu = null
+                                }) { Text("Edit folder") }
+                            } else if (menuTile.albumId != null) {
+                                val albumId: Long = menuTile.albumId!!
+                                val inFolder = groups.firstOrNull { albumId in it.albumIds }
+                                if (inFolder != null) {
+                                    TextButton(onClick = {
+                                        updateGroups(
+                                            groups.map { g ->
+                                                if (g.id == inFolder.id) g.copy(albumIds = g.albumIds.filter { it != albumId }) else g
+                                            }
+                                        )
+                                        tileMenu = null
+                                    }) { Text("Keluarkan dari folder \"${inFolder.name}\"") }
+                                }
+                                groups.filter { it.id != inFolder?.id }.forEach { g ->
+                                    TextButton(onClick = {
+                                        updateGroups(
+                                            groups.map { x ->
+                                                if (x.id == g.id) x.copy(albumIds = x.albumIds.filter { it != albumId } + albumId)
+                                                else x.copy(albumIds = x.albumIds.filter { it != albumId })
+                                            }
+                                        )
+                                        tileMenu = null
+                                    }) { Text("Masuk ke \"${g.name}\"") }
+                                }
+                                TextButton(onClick = {
+                                    editor = FolderEditorRequest(null, setOf(albumId))
+                                    tileMenu = null
+                                }) { Text("Folder baru dengan album ni") }
+                            }
+                        }
+                    },
+                    confirmButton = {
+                        TextButton(onClick = { tileMenu = null }) { Text("Close") }
+                    }
+                )
             }
 
             val showMini = hasPermission && screen != "player" && miniPlayerActive
@@ -566,13 +897,139 @@ private fun PermissionScreen(onGrant: () -> Unit) {
 }
 
 @Composable
-private fun AlbumScreen(
-    albums: List<AlbumEntry>,
-    total: Int,
+private fun ActionPill(icon: ImageVector, label: String, onClick: () -> Unit) {
+    Row(
+        Modifier
+            .clip(RoundedCornerShape(50))
+            .background(SurfaceDark)
+            .clickable { onClick() }
+            .padding(horizontal = 12.dp, vertical = 7.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Icon(icon, contentDescription = null, tint = TextMain, modifier = Modifier.size(16.dp))
+        Spacer(Modifier.width(6.dp))
+        Text(label, color = TextMain, fontSize = 13.sp, fontWeight = FontWeight.Medium)
+    }
+}
+
+@Composable
+private fun TileThumb(tile: AlbumTileData, perfMode: PerformanceMode, modifier: Modifier) {
+    Box(modifier) {
+        val cover = tile.cover
+        if (cover != null) {
+            MediaThumbnail(
+                uri = cover,
+                isVideo = tile.coverIsVideo,
+                perfMode = perfMode,
+                modifier = Modifier.fillMaxSize(),
+                square = true
+            )
+        } else {
+            Box(
+                Modifier.fillMaxSize().background(ThumbPlaceholder),
+                contentAlignment = Alignment.Center
+            ) {
+                Icon(Icons.Default.Folder, contentDescription = null, tint = TextMuted, modifier = Modifier.size(30.dp))
+            }
+        }
+        if (tile.groupId != null) {
+            Box(
+                Modifier
+                    .align(Alignment.BottomStart)
+                    .padding(5.dp)
+                    .size(22.dp)
+                    .clip(CircleShape)
+                    .background(Color(0xAA000000)),
+                contentAlignment = Alignment.Center
+            ) {
+                Icon(Icons.Default.Folder, contentDescription = "Folder", tint = TextMain, modifier = Modifier.size(14.dp))
+            }
+        }
+    }
+}
+
+@OptIn(ExperimentalFoundationApi::class)
+@Composable
+private fun AlbumGridTile(
+    tile: AlbumTileData,
     perfMode: PerformanceMode,
+    onOpen: () -> Unit,
+    onLongPress: () -> Unit
+) {
+    Column(
+        Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(8.dp))
+            .combinedClickable(onClick = onOpen, onLongClick = onLongPress)
+    ) {
+        TileThumb(
+            tile = tile,
+            perfMode = perfMode,
+            modifier = Modifier.fillMaxWidth().aspectRatio(16f / 9f).clip(RoundedCornerShape(8.dp))
+        )
+        Spacer(Modifier.height(6.dp))
+        Text(
+            tile.title,
+            color = TextMain,
+            fontSize = 15.sp,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis
+        )
+        Text(tile.subtitle, color = TextMuted, fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+    }
+}
+
+@OptIn(ExperimentalFoundationApi::class)
+@Composable
+private fun AlbumListRow(
+    tile: AlbumTileData,
+    perfMode: PerformanceMode,
+    onOpen: () -> Unit,
+    onLongPress: () -> Unit
+) {
+    Row(
+        Modifier.fillMaxWidth()
+            .clip(RoundedCornerShape(14.dp))
+            .background(SurfaceDark)
+            .combinedClickable(onClick = onOpen, onLongClick = onLongPress)
+            .padding(16.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        TileThumb(
+            tile = tile,
+            perfMode = perfMode,
+            modifier = Modifier.size(52.dp).clip(RoundedCornerShape(10.dp))
+        )
+        Spacer(Modifier.width(14.dp))
+        Column(Modifier.weight(1f)) {
+            Text(tile.title, color = TextMain, fontWeight = FontWeight.Medium, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            Text(tile.subtitle, color = TextMuted, fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+        }
+        Text("›", color = TextMuted, fontSize = 28.sp)
+    }
+}
+
+/**
+ * Skrin senarai album. Dipakai untuk home (isHome = true) dan untuk dalam folder (isHome = false).
+ */
+@Composable
+private fun AlbumScreen(
+    title: String,
+    subtitle: String,
+    tiles: List<AlbumTileData>,
+    isHome: Boolean,
+    perfMode: PerformanceMode,
+    gridMode: Boolean,
+    gridState: LazyGridState,
+    listState: LazyListState,
+    onBack: () -> Unit,
+    onToggleGrid: () -> Unit,
     onSelectPerfMode: (PerformanceMode) -> Unit,
     onRefresh: () -> Unit,
-    onSelect: (AlbumEntry) -> Unit
+    onNewFolder: () -> Unit,
+    onEditFolder: () -> Unit,
+    onOpen: (AlbumTileData) -> Unit,
+    onLongPress: (AlbumTileData) -> Unit
 ) {
     var settingsMenuOpen by remember { mutableStateOf(false) }
 
@@ -583,12 +1040,24 @@ private fun AlbumScreen(
             horizontalArrangement = Arrangement.SpaceBetween,
             verticalAlignment = Alignment.CenterVertically
         ) {
-            Column(Modifier.weight(1f)) {
-                Text("ASTRA PLAYER", color = TextMain, fontWeight = FontWeight.Bold, fontSize = 21.sp, letterSpacing = 1.sp)
-                Text("$total items · ${albums.size} albums", color = TextMuted, fontSize = 12.sp)
+            if (!isHome) {
+                IconButton(onClick = onBack) {
+                    Icon(Icons.Default.ArrowBack, contentDescription = "Back", tint = TextMain)
+                }
             }
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                TextButton(onClick = onRefresh) { Text("Refresh", color = TextMain) }
+            Column(Modifier.weight(1f)) {
+                Text(
+                    title,
+                    color = TextMain,
+                    fontWeight = FontWeight.Bold,
+                    fontSize = 21.sp,
+                    letterSpacing = if (isHome) 1.sp else 0.sp,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+                Text(subtitle, color = TextMuted, fontSize = 12.sp)
+            }
+            if (isHome) {
                 Box {
                     IconButton(onClick = { settingsMenuOpen = true }) {
                         Icon(Icons.Default.Settings, contentDescription = "Settings", tint = TextMain)
@@ -623,51 +1092,134 @@ private fun AlbumScreen(
                 }
             }
         }
-        Spacer(Modifier.height(16.dp))
-        if (albums.isEmpty()) {
+        Spacer(Modifier.height(10.dp))
+        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            ActionPill(
+                icon = if (gridMode) Icons.Default.ViewList else Icons.Default.GridView,
+                label = if (gridMode) "List" else "Grid",
+                onClick = onToggleGrid
+            )
+            if (isHome) {
+                ActionPill(Icons.Default.CreateNewFolder, "New folder", onNewFolder)
+                ActionPill(Icons.Default.Refresh, "Refresh", onRefresh)
+            } else {
+                ActionPill(Icons.Default.Edit, "Edit folder", onEditFolder)
+            }
+        }
+        Spacer(Modifier.height(14.dp))
+
+        if (tiles.isEmpty()) {
             Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                Text("No videos found.", color = TextMuted)
+                Text(if (isHome) "No videos found." else "Folder ni kosong. Tekan Edit folder untuk tambah album.", color = TextMuted)
+            }
+        } else if (gridMode) {
+            LazyVerticalGrid(
+                columns = GridCells.Fixed(2),
+                state = gridState,
+                horizontalArrangement = Arrangement.spacedBy(14.dp),
+                verticalArrangement = Arrangement.spacedBy(14.dp),
+                contentPadding = PaddingValues(bottom = 24.dp)
+            ) {
+                gridItems(tiles, key = { it.key }) { tile ->
+                    AlbumGridTile(
+                        tile = tile,
+                        perfMode = perfMode,
+                        onOpen = { onOpen(tile) },
+                        onLongPress = { onLongPress(tile) }
+                    )
+                }
             }
         } else {
             LazyColumn(
+                state = listState,
                 verticalArrangement = Arrangement.spacedBy(9.dp),
                 contentPadding = PaddingValues(bottom = 24.dp)
             ) {
-                items(albums, key = { it.id }) { album ->
-                    Row(
-                        Modifier.fillMaxWidth()
-                            .background(SurfaceDark, RoundedCornerShape(14.dp))
-                            .clickable { onSelect(album) }
-                            .padding(16.dp),
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        val cover = album.cover
-                        if (cover != null) {
-                            MediaThumbnail(
-                                uri = cover,
-                                isVideo = album.coverIsVideo,
-                                perfMode = perfMode,
-                                modifier = Modifier.size(52.dp).clip(RoundedCornerShape(10.dp)),
-                                square = true
-                            )
-                        } else {
-                            Icon(Icons.Default.Folder, contentDescription = null, tint = TextMuted, modifier = Modifier.size(30.dp))
-                        }
-                        Spacer(Modifier.width(14.dp))
-                        Column(Modifier.weight(1f)) {
-                            Text(album.name, color = TextMain, fontWeight = FontWeight.Medium)
-                            val counts = buildList {
-                                if (album.videoCount > 0) add("${album.videoCount} videos")
-                                if (album.photoCount > 0) add("${album.photoCount} photos")
-                            }.joinToString(" · ")
-                            Text(counts, color = TextMuted, fontSize = 12.sp)
-                        }
-                        Text("›", color = TextMuted, fontSize = 28.sp)
-                    }
+                items(tiles, key = { it.key }) { tile ->
+                    AlbumListRow(
+                        tile = tile,
+                        perfMode = perfMode,
+                        onOpen = { onOpen(tile) },
+                        onLongPress = { onLongPress(tile) }
+                    )
                 }
             }
         }
     }
+}
+
+/**
+ * Dialog untuk buat / edit folder (kumpulan album).
+ * otherFolderOf: albumId -> nama folder lain yang dah ada album tu (kalau dipilih, album akan dipindahkan).
+ */
+@Composable
+private fun FolderEditorDialog(
+    title: String,
+    initialName: String,
+    albums: List<AlbumEntry>,
+    initialSelected: Set<Long>,
+    otherFolderOf: Map<Long, String>,
+    onDismiss: () -> Unit,
+    onConfirm: (String, Set<Long>) -> Unit,
+    onDelete: (() -> Unit)?
+) {
+    var name by remember { mutableStateOf(initialName) }
+    var selected by remember { mutableStateOf(initialSelected) }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        containerColor = SurfaceDark,
+        title = { Text(title, color = TextMain) },
+        text = {
+            Column {
+                OutlinedTextField(
+                    value = name,
+                    onValueChange = { name = it },
+                    singleLine = true,
+                    label = { Text("Nama folder") },
+                    modifier = Modifier.fillMaxWidth()
+                )
+                Spacer(Modifier.height(12.dp))
+                Text("Pilih album (${selected.size})", color = TextMuted, fontSize = 12.sp)
+                Spacer(Modifier.height(4.dp))
+                LazyColumn(Modifier.heightIn(max = 320.dp)) {
+                    items(albums, key = { it.id }) { album ->
+                        val toggle = {
+                            selected = if (album.id in selected) selected - album.id else selected + album.id
+                        }
+                        Row(
+                            Modifier.fillMaxWidth().clickable { toggle() }.padding(vertical = 2.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Checkbox(checked = album.id in selected, onCheckedChange = { toggle() })
+                            Column(Modifier.weight(1f)) {
+                                Text(album.name, color = TextMain, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                val other = otherFolderOf[album.id]
+                                Text(
+                                    if (other != null) "${album.count} items · dalam folder \"$other\"" else "${album.count} items",
+                                    color = TextMuted,
+                                    fontSize = 12.sp,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = { onConfirm(name, selected) }) { Text("Save") }
+        },
+        dismissButton = {
+            Row {
+                if (onDelete != null) {
+                    TextButton(onClick = onDelete) { Text("Delete", color = Color(0xFFFF6B6B)) }
+                }
+                TextButton(onClick = onDismiss) { Text("Cancel") }
+            }
+        }
+    )
 }
 
 @Composable
