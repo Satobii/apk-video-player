@@ -12,5 +12,5 @@ dependencyResolutionManagement {
         mavenCentral()
     }
 }
-rootProject.name = "SatobiiPlayer"
+rootProject.name = "AstraPlayer"
 include(":app")
