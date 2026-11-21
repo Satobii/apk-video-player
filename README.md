@@ -1,4 +1,4 @@
-# Satobii Player v1.1 — Android source project
+# Astra Player v1.1 — Android source project
 
 ## Target and features
 - Android 16 target (API 36), min Android 8.0 (API 26)
